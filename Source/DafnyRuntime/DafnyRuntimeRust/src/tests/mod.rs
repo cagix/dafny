@@ -1,9 +1,24 @@
 
+pub mod experimental;
 // Test module
-mod experimental;
 #[cfg(test)]
 mod tests {
     use crate::*;
+
+    #[test]
+    fn test_int() {
+        let x = int!(37);
+        assert_eq!(x.to_u8().unwrap(), truncate!(x.clone(), u8));
+        assert_eq!(x.to_u16().unwrap(), truncate!(x.clone(), u16));
+        assert_eq!(x.to_u32().unwrap(), truncate!(x.clone(), u32));
+        assert_eq!(x.to_u64().unwrap(), truncate!(x.clone(), u64));
+        assert_eq!(x.to_u128().unwrap(), truncate!(x.clone(), u128));
+        assert_eq!(x.to_i8().unwrap(), truncate!(x.clone(), i8));
+        assert_eq!(x.to_i16().unwrap(), truncate!(x.clone(), i16));
+        assert_eq!(x.to_i32().unwrap(), truncate!(x.clone(), i32));
+        assert_eq!(x.to_i64().unwrap(), truncate!(x.clone(), i64));
+        assert_eq!(x.to_i128().unwrap(), truncate!(x.clone(), i128));
+    }
 
     #[test]
     fn test_sequence() {
@@ -20,7 +35,7 @@ mod tests {
 
         assert_eq!(concat.cardinality_usize(), 6);
         match &concat {
-            Sequence::ConcatSequence { boxed, length, left, right} => {
+            Sequence::ConcatSequence { boxed, length, left, ..} => {
                 assert_eq!(*length, 6);
                 assert_eq!(unsafe {&*left.get()}.cardinality_usize(), 3);
                 // Test that boxed is None
@@ -31,7 +46,7 @@ mod tests {
         let value = concat.select(0);
         assert_eq!(value, 1);
         match &concat {
-            crate::Sequence::ConcatSequence { boxed, length, left, right} => {
+            crate::Sequence::ConcatSequence { boxed, ..} => {
                 assert_eq!(*boxed.as_ref().clone().borrow().as_ref().unwrap().as_ref(), vec![1, 2, 3, 4, 5, 6]);
             },
             _ => panic!("This should never happen")        
@@ -169,6 +184,162 @@ mod tests {
         let m_4b = m_5.subtract(&set!{3});
         assert_eq!(m_4b.cardinality_usize(), 4);
         assert_eq!(m_4b.contains(&3), false)
+    }
+
+    #[test]
+    fn test_dafny_array() {
+        let a = array![1, 2, 3];
+        assert_eq!(a.length_usize(), 3);
+        assert_eq!(a.length(), int!(3));
+        assert_eq!(a.get_usize(0), 1);
+        assert_eq!(a.get_usize(1), 2);
+        assert_eq!(a.get_usize(2), 3);
+        a.update_usize(0, 4);
+        a.update_usize(1, 5);
+        a.update_usize(2, 6);
+        assert_eq!(a.get_usize(0), 4);
+        assert_eq!(a.get_usize(1), 5);
+        assert_eq!(a.get_usize(2), 6);
+        deallocate(a.0);
+    }
+
+    #[test]
+    fn test_dafny_array_init() {
+        // test from_vec, and initialize
+        let mut v = Vec::new();
+        v.push(1);
+        v.push(2);
+        v.push(3);
+        let a = Array::from_vec(v);
+        assert_eq!(a.length_usize(), 3);
+        assert_eq!(a.get_usize(0), 1);
+        let v2 = Array::initialize_usize(3, Rc::new(|i| i + 1));
+        assert_eq!(v2.length_usize(), 3);
+        assert_eq!(v2.get_usize(0), 1);
+        assert_eq!(v2.get_usize(1), 2);
+        assert_eq!(v2.get_usize(2), 3);
+        v2.update_usize(1, 10);
+        assert_eq!(v2.get_usize(1), 10);
+
+        let v3 = Array::initialize(&int!(3), Rc::new(|i| i.clone() + int!(1)));
+        assert_eq!(v3.length_usize(), 3);
+        assert_eq!(v3.get_usize(0), int!(1));
+        assert_eq!(v3.get_usize(1), int!(2));
+        assert_eq!(v3.get_usize(2), int!(3));
+        v3.update(&int!(1), int!(10));
+        assert_eq!(v3.get_usize(1), int!(10));
+    }
+
+    struct ClassWrapper<T> {
+        /*var*/t: T,
+        /*var*/x: crate::DafnyInt,
+        /*const*/next: *mut ClassWrapper<T>,
+        /*const*/constant: crate::DafnyInt
+    }
+    impl <T: Clone> ClassWrapper<T> {
+        fn constant_plus_x(&self) -> crate::DafnyInt {
+            self.constant.clone() + self.x.clone()
+        }
+        fn increment_x(&mut self) {
+            self.x = self.x.clone() + int!(1);
+        }
+    }
+
+    impl <T: Clone + Display> ClassWrapper<T> {
+        fn constructor(t: T) -> *mut ClassWrapper<T> {
+            let this = crate::allocate::<ClassWrapper<T>>();
+            overwrite_field!(this, t, t);
+            overwrite_field!(this, next, this);
+            // If x is assigned twice, we need to keep track of whether it's assigned
+            // like in methods.
+            let mut x_assigned = false;
+            uninit_assign_field!(this, x, x_assigned, int!(2));
+            uninit_assign_field!(this, x, x_assigned, int!(1));
+            // If we can prove that x is assigned, we can even write this
+            modify!(this).x = int!(0);
+            overwrite_field!(this, constant, int!(42));
+            this
+        }
+    }
+
+    #[test]
+    #[allow(unused_unsafe)]
+    fn test_class_wrapper() {
+        let c: *mut ClassWrapper<i32> = ClassWrapper::constructor(53);
+        assert_eq!(read!(c).constant, int!(42));
+        assert_eq!(read!(c).t, 53);
+        assert_eq!(read!(c).x, int!(0));
+        assert_eq!(read!(read!(c).next).t, 53);
+        assert_eq!(read!(c).constant_plus_x(), int!(42));
+        modify!(c).increment_x();
+        assert_eq!(read!(c).constant_plus_x(), int!(43));
+        modify!(c).x = int!(40);
+        assert_eq!(read!(c).constant_plus_x(), int!(82));
+        modify!(c).t = 54;
+        assert_eq!(read!(c).t, 54);
+        let x_copy = read!(c).x.clone();
+        assert_eq!(Rc::strong_count(&x_copy.data), 2);
+        deallocate(c);
+        assert_eq!(Rc::strong_count(&x_copy.data), 1);
+    }
+
+
+    #[test]
+    #[allow(unused_unsafe)]
+    fn test_extern_class_wrapper_with_box() {
+        #[allow(unused_mut)]
+        let mut c = Box::new(ClassWrapper {
+            t: 53,
+            x: int!(0),
+            next: std::ptr::null_mut(),
+            constant: int!(42)
+        });
+        assert_eq!(read!(c).constant, int!(42));
+        modify!(c).increment_x();
+        assert_eq!(read!(c).constant_plus_x(), int!(43));
+        // Automatically dropped
+    }
+
+    
+    #[test]
+    #[allow(unused_unsafe)]
+    fn test_extern_class_wrapper_with_mutable_borrow() {
+        #[allow(unused_mut)]
+        let c: &mut ClassWrapper<i32> = &mut ClassWrapper {
+            t: 53,
+            x: int!(0),
+            next: std::ptr::null_mut(),
+            constant: int!(42)
+        };
+        assert_eq!(read!(c).constant, int!(42));
+        modify!(c).increment_x();
+        assert_eq!(read!(c).constant_plus_x(), int!(43));
+        // Automatically dropped
+    }
+    
+    // Requires test1 || test2
+    fn assign_lazy_in_method(test1: bool, test2: bool) -> Rc<i32> {
+        let mut t = var_uninit!(Rc<i32>);
+        let mut t_assigned: bool = false;
+        if test1 {
+            uninit_assign!(t, t_assigned, Rc::new(5 as i32));
+        }
+        if test2 {
+            uninit_assign!(t, t_assigned, Rc::new(7 as i32 + if test1 {*t} else {0}));
+        }
+        println!("{}", *t);
+        assert!(t_assigned);
+        t
+    }
+
+    #[test]
+    fn assign_lazy_in_method_test() {
+        let mut t = assign_lazy_in_method(true, false);
+        assert_eq!(*t, 5);
+        t = assign_lazy_in_method(false, true);
+        assert_eq!(*t, 7);
+        t = assign_lazy_in_method(true, true);
+        assert_eq!(*t, 12);
     }
 }
 // Struct containing two reference-counted fields

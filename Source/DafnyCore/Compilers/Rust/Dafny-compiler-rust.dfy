@@ -446,6 +446,7 @@ module RAST
 
   datatype Expr =
       RawExpr(content: string)
+    | ExprFromType(tpe: Type)
     | Identifier(name: string) // Can be empty for global in MemberSelect
     | Match(matchee: Expr, cases: seq<MatchCase>)
     | StmtExpr(stmt: Expr, rhs: Expr)
@@ -479,6 +480,7 @@ module RAST
     const printingInfo: PrintingInfo := 
       match this {
         case RawExpr(_) => UnknownPrecedence()
+        case ExprFromType(_) => Precedence(1)
         case Identifier(_) => Precedence(1)
         case LiteralInt(_) => Precedence(1)
         case LiteralString(_, _) => Precedence(1)
@@ -520,6 +522,7 @@ module RAST
     function Height(): nat {
       match this {
         case Identifier(_) => 1
+        case ExprFromType(_) => 1
         case LiteralInt(_) => 1
         case LiteralString(_, _) => 1
         case Match(matchee, cases) =>
@@ -621,18 +624,20 @@ module RAST
           assert BinaryOp("<=", right, left, BinOpFormat.NoFormat()).Height()
               == BinaryOp("<", left, right, BinOpFormat.ReverseOperands()).Height();
           BinaryOp("<=", right, left, BinOpFormat.NoFormat())
-        case CallType(CallType(Select(expr, "into"), tpes), args) =>
-          if |tpes| != 1 || |args| != 0 then this
-          else 
-            var tpe := tpes[0];
-            if
-             || tpe.U8? || tpe.U16? || tpe.U32? || tpe.U64? || tpe.U128?
-             || tpe.I8? || tpe.I16? || tpe.I32? || tpe.I64? || tpe.I128? then
+        case Call(MemberSelect(r, "truncate!"), args) =>
+          if (r != dafny_runtime && r != global) || |args| != 2  then
+            this
+          else
+            var expr := args[0];
+            var tpeExpr := args[1];
+            if !tpeExpr.ExprFromType? then this else
+            var tpe := tpeExpr.tpe;
+            if || tpe.U8? || tpe.U16? || tpe.U32? || tpe.U64? || tpe.U128?
+               || tpe.I8? || tpe.I16? || tpe.I32? || tpe.I64? || tpe.I128? then
             match expr {
-              case Call(MemberSelect(
-                MemberSelect(MemberSelect(
-                Identifier(""), "dafny_runtime"), "DafnyInt"), "from"), args) =>
-                if |args| == 1 then
+              case Call(
+                MemberSelect(base, "int!"), args) =>
+                if |args| == 1 && (base == dafny_runtime || base == global) then
                   match args[0] {
                     case LiteralInt(number) => LiteralInt(number)
                     case LiteralString(number, _) => LiteralInt(number)
@@ -698,6 +703,7 @@ module RAST
     {
       match this.Optimize() {
         case Identifier(name) => name
+        case ExprFromType(t) => t.ToString(ind)
         case LiteralInt(number) => number
         case LiteralString(characters, binary) =>
           (if binary then "b" else "") +
@@ -2334,9 +2340,9 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
           match t {
             case Primitive(Int) => {
               if |i| <= 4 {
-                r := R.dafny_runtime.MSel("DafnyInt").MSel("from").Apply1(R.LiteralInt(i));
+                r := R.dafny_runtime.MSel("int!").Apply1(R.LiteralInt(i));
               } else {
-                r := R.dafny_runtime.MSel("DafnyInt").MSel("from").Apply1(
+                r := R.dafny_runtime.MSel("int!").Apply1(
                   R.LiteralString(i, binary := true));
               }
             }
@@ -2573,11 +2579,11 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
             assert {:split_here} true;
             var nativeToType := NewtypeToRustType(b, range);
             if fromTpe == b {
-              var recursiveGen, recOwned, recIdents := GenExpr(expr, selfIdent, env, expectedOwnership);
+              var recursiveGen, recOwned, recIdents := GenExpr(expr, selfIdent, env, OwnershipOwned);
               readIdents := recIdents;
               match nativeToType {
                 case Some(v) =>
-                  r := recursiveGen.Sel("into").ApplyType([v]).Apply([]);
+                  r := R.dafny_runtime.MSel("truncate!").Apply([recursiveGen, R.ExprFromType(v)]);
                   r, resultingOwnership := FromOwned(r, expectedOwnership);
                 case None =>
                   if erase {

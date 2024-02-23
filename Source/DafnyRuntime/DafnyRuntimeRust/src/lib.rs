@@ -1,16 +1,17 @@
 #[cfg(test)]
 mod tests;
-use std::{any::Any, borrow::Borrow, cell::{RefCell, UnsafeCell}, cmp::Ordering, collections::{HashMap, HashSet}, fmt::{Debug, Display, Formatter}, hash::{Hash, Hasher}, ops::{Add, Deref, Div, Mul, Neg, Rem, Sub}, rc::Rc};
-use num::{bigint::ParseBigIntError, Integer, Num, One, Signed, ToPrimitive};
-
+use std::{any::Any, borrow::Borrow, cell::{RefCell, UnsafeCell}, cmp::Ordering, collections::{HashMap, HashSet}, fmt::{Debug, Display, Formatter}, hash::{Hash, Hasher}, mem::MaybeUninit, ops::{Add, Deref, Div, Mul, Neg, Rem, Sub}, rc::Rc};
+use num::{bigint::ParseBigIntError, Integer, Num, One, Signed};
 pub use once_cell::unsync::Lazy;
 
 pub use num::bigint::BigInt;
 pub use num::rational::BigRational;
 pub use num::FromPrimitive;
+pub use num::ToPrimitive;
 pub use num::NumCast;
 pub use num::Zero;
 pub use itertools;
+pub use std::convert::Into;
 
 // An atomic box is just a RefCell in Rust
 pub type SizeT = usize;
@@ -40,6 +41,8 @@ pub mod dafny_runtime_conversions {
     pub type DafnyMultiset<T> = crate::Multiset<T>;
     pub type DafnyBool = bool;
     pub type DafnyString = String;
+    pub type DafnyChar = crate::DafnyChar;
+    pub type DafnyCharUTF16 = crate::DafnyCharUTF16;
 
     use num::BigInt;
     use num::ToPrimitive;
@@ -176,6 +179,66 @@ pub struct DafnyInt {
     data: Rc<BigInt>
 }
 
+// truncate_u(x, u64)
+// = <DafnyInt as ToPrimitive>::to_u128(&x).unwrap() as u64;
+#[macro_export]
+macro_rules! truncate {
+    ($x:expr, $t:ty) => {
+        <$crate::DafnyInt as $crate::Into<$t>>::into($x)
+    }
+}
+
+impl Into<u8> for DafnyInt {
+    fn into(self) -> u8 {
+        self.data.to_u8().unwrap()
+    }
+}
+impl Into<u16> for DafnyInt {
+    fn into(self) -> u16 {
+        self.data.to_u16().unwrap()
+    }
+}
+impl Into<u32> for DafnyInt {
+    fn into(self) -> u32 {
+        self.data.to_u32().unwrap()
+    }
+}
+impl Into<u64> for DafnyInt {
+    fn into(self) -> u64 {
+        self.data.to_u64().unwrap()
+    }
+}
+impl Into<u128> for DafnyInt {
+    fn into(self) -> u128 {
+        self.data.to_u128().unwrap()
+    }
+}
+impl Into<i8> for DafnyInt {
+    fn into(self) -> i8 {
+        self.data.to_i8().unwrap()
+    }
+}
+impl Into<i16> for DafnyInt {
+    fn into(self) -> i16 {
+        self.data.to_i16().unwrap()
+    }
+}
+impl Into<i32> for DafnyInt {
+    fn into(self) -> i32 {
+        self.data.to_i32().unwrap()
+    }
+}
+impl Into<i64> for DafnyInt {
+    fn into(self) -> i64 {
+        self.data.to_i64().unwrap()
+    }
+}
+impl Into<i128> for DafnyInt {
+    fn into(self) -> i128 {
+        self.data.to_i128().unwrap()
+    }
+}
+
 impl ToPrimitive for DafnyInt {
     fn to_i64(&self) -> Option<i64> {
         self.data.to_i64()
@@ -183,6 +246,15 @@ impl ToPrimitive for DafnyInt {
 
     fn to_u64(&self) -> Option<u64> {
         self.data.to_u64()
+    }
+
+    // Override of functions
+    fn to_u128(&self) -> Option<u128> {
+        self.data.to_u128()
+    }
+
+    fn to_i128(&self) -> Option<i128> {
+        self.data.to_i128()
     }
 }
 
@@ -1354,21 +1426,6 @@ impl <V: DafnyTypeEq> Hash for Multiset<V> {
     }
 }
 
-// Generic function to allocate and return a raw pointer immediately
-#[inline]
-pub fn allocate<T: ?Sized>(value: Box<T>) -> *const T {
-    Box::into_raw(value)
-}
-
-// Generic function to safely deallocate a raw pointer
-#[inline]
-pub fn deallocate<T : ?Sized>(pointer: *const T) {
-    unsafe {
-        // Takes ownership of the reference,
-        // so that it's deallocated at the end of the method
-        let _ = Box::from_raw(pointer as *mut T);
-    }
-}
 // Define the AsAny trait
 pub trait AsAny {
   fn as_any(&self) -> &dyn Any;
@@ -1986,3 +2043,181 @@ macro_rules! int {
     }
 }
 
+//////////
+// Arrays
+//////////
+
+// An Dafny array is a zero-cost abstraction over a pointer on a native array
+#[derive(Clone)]
+pub struct Array<T>(*mut [T]);
+
+impl <T: Clone> Copy for Array<T> {}
+
+impl <T: DafnyType> DafnyType for Array<T> {}
+impl <T> Debug for Array<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Array")
+    }
+}
+impl <T> DafnyPrint for Array<T> {
+    fn fmt_print(&self, f: &mut Formatter<'_>, _in_seq: bool) -> std::fmt::Result {
+        write!(f, "Array")
+    }
+}
+
+// array![1, 2, 3] create a Dafny array
+#[macro_export]
+macro_rules! array {
+    ($($x:expr), *) => {
+        Array::from_native_array(Box::new([$($x), *]))
+    }
+}
+impl <T: Clone> Array<T> {
+    #[inline]
+    pub fn from_native_array(v: Box<[T]>) -> Self {
+        Array(Box::into_raw(v))
+    }
+    #[inline]
+    pub fn from_vec(v: Vec<T>) -> Self {
+        Array::from_native_array(v.into_boxed_slice())
+    }
+    pub fn initialize_usize(n: usize, initializer: Rc<dyn Fn(usize) -> T>) -> Array<T> {
+        let mut v = Vec::with_capacity(n);
+        for i in 0..n {
+            v.push(initializer(i));
+        }
+        Array::from_vec(v)
+    }
+    pub fn initialize(n: &DafnyInt, initializer: Rc<dyn Fn(&DafnyInt) -> T>) -> Array<T> {
+        let n_usize = n.to_usize().unwrap();
+        let mut v = Vec::with_capacity(n_usize);
+        for i in 0..n_usize {
+            v.push(initializer(&int!(i)));
+        }
+        Array::from_vec(v)
+    }
+    
+    #[inline]
+    pub fn length_usize(self) -> usize {
+        unsafe{&*self.0}.len()
+    }
+    #[inline]
+    pub fn length(self) -> DafnyInt {
+        int!(self.length_usize())
+    }
+    #[inline]
+    pub fn get_usize(self, i: usize) -> T {
+        (unsafe{&*self.0} as &[T])[i].clone()
+    }
+    #[inline]
+    pub fn get(self, i: &DafnyInt) -> T {
+        self.get_usize(i.to_usize().unwrap())
+    }
+    #[inline]
+    pub fn update_usize(self, i: usize, val: T) {
+        (unsafe{&mut *self.0} as &mut [T])[i] = val;
+    }
+    #[inline]
+    pub fn update(self, i: &DafnyInt, val: T) {
+        self.update_usize(i.to_usize().unwrap(), val);
+    }
+}
+
+
+///////////////////
+// Class helpers //
+///////////////////
+pub fn allocate<T>() -> *mut T {
+    let mut this: Box<MaybeUninit<T>> = Box::new(MaybeUninit::uninit());
+    let this_ptr = this.as_mut() as *mut MaybeUninit<T> as *mut T;
+    Box::into_raw(this); // Make sure this is not dropped
+    this_ptr
+}
+// Generic function to safely deallocate a raw pointer
+#[inline]
+pub fn deallocate<T : ?Sized>(pointer: *const T) {
+    unsafe {
+        // Takes ownership of the reference,
+        // so that it's deallocated at the end of the method
+        let _ = Box::from_raw(pointer as *mut T);
+    }
+}
+
+// When initializing an uninitialized field for the first time,
+// we ensure we don't drop the previous content
+// This is problematic if the same field is overwritten multiple times
+/// In that case, prefer to use uninit_assign
+#[macro_export]
+macro_rules! overwrite_field {
+    ($ptr:expr, $field:ident, $value:expr) => {
+        overwrite!((*$ptr).$field, $value)
+    }
+}
+
+// When initializing an uninitialized field for the first time,
+// we ensure we don't drop the previous content
+#[macro_export]
+macro_rules! overwrite {
+    ($ptr:expr, $value:expr) => {
+        unsafe { ::std::ptr::addr_of_mut!($ptr).write($value) }
+    }
+}
+
+// Given a class or array pointer, transforms it to a mutable reference
+#[macro_export]
+macro_rules! modify {
+    ($ptr:expr) => {
+        (unsafe { &mut *$ptr })
+    }
+}
+
+// Given a class or array pointer, transforms it to a read-only reference
+#[macro_export]
+macro_rules! read {
+    ($ptr:expr) => {
+        (unsafe { &*$ptr })
+    }
+}
+
+// uninit!(Rc<i32>)
+// == unsafe { transmute::<MaybeUninit::<Rc<i32>>, Rc<i32>>(MaybeUninit::<Rc<i32>>::uninit()) };
+#[macro_export]
+macro_rules! var_uninit {
+    ($tpe:ty) => {
+        unsafe { ::std::mem::transmute::<MaybeUninit::<$tpe>, $tpe>(MaybeUninit::<$tpe>::uninit()) }
+    }
+}
+//  assign_maybe_uninit!(t, t_assigned, value)
+/*  let computed_value = value;
+    if t_assigned {
+        t = computed_value;
+    } else {
+        overwrite!(t, computed_value);
+        t_assigned = true;
+    } */
+#[macro_export]
+macro_rules! uninit_assign {
+    ($t:expr, $t_assigned:expr, $value:expr) => {
+        let computed_value = $value;
+        if $t_assigned {
+            $t = computed_value;
+        } else {
+            overwrite!($t, computed_value);
+            $t_assigned = true;
+        }
+    }
+}
+
+// If the field is guaranteed to be assigned only once, overwrite_field is sufficient
+#[macro_export]
+macro_rules! uninit_assign_field {
+    ($t:expr, $field:ident, $field_assigned:expr, $value:expr) => {
+        let computed_value = $value;
+        if $field_assigned {
+            modify!($t).$field = computed_value;
+        } else {
+            overwrite_field!($t, $field, computed_value);
+            $field_assigned = true;
+        }
+    }
+}
