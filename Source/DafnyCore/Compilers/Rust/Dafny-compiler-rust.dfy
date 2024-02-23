@@ -2574,7 +2574,7 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
             var nativeToType := NewtypeToRustType(b, range);
             if fromTpe == b {
               var recursiveGen, recOwned, recIdents := GenExpr(expr, selfIdent, env, expectedOwnership);
-
+              readIdents := recIdents;
               match nativeToType {
                 case Some(v) =>
                   r := recursiveGen.Sel("into").ApplyType([v]).Apply([]);
@@ -2588,7 +2588,6 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
                   }
                   r, resultingOwnership := FromOwnership(r, recOwned, expectedOwnership);
               }
-              readIdents := recIdents;
             } else {
               if nativeToType.Some? {
                 // Conversion between any newtypes that can be expressed as a native Rust type
@@ -2620,6 +2619,7 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
             var nativeFromType := NewtypeToRustType(b, range);
             if b == toTpe {
               var recursiveGen, recOwned, recIdents := GenExpr(expr, selfIdent, env, expectedOwnership);
+              readIdents := recIdents;
               match nativeFromType {
                 case Some(v) =>
                   var toTpeRust := GenType(toTpe, false, false);
@@ -2632,7 +2632,6 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
                     r := recursiveGen.Sel("0");
                   }
                   r, resultingOwnership := FromOwnership(r, recOwned, expectedOwnership);
-                  readIdents := recIdents;
               }
             } else {
               if nativeFromType.Some? {
