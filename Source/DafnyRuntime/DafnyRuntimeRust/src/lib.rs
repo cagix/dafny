@@ -40,7 +40,6 @@ pub mod dafny_runtime_conversions {
     pub type DafnySet<T> = crate::Set<T>;
     pub type DafnyMultiset<T> = crate::Multiset<T>;
     pub type DafnyBool = bool;
-    pub type DafnyString = String;
     pub type DafnyChar = crate::DafnyChar;
     pub type DafnyCharUTF16 = crate::DafnyCharUTF16;
 
@@ -660,6 +659,9 @@ impl <T> PartialEq<Sequence<T>> for Sequence<T>
     fn eq(&self, other: &Sequence<T>) -> bool {
         // Iterate through both elements and verify that they are equal
         let values: Rc<Vec<T>> = self.to_array();
+        if other.cardinality_usize() != values.len() {
+            return false;
+        }
         let mut i: usize = 0;
         for value in values.iter() {
             if value != &other.select(i) {

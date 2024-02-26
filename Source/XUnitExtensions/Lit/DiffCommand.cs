@@ -11,7 +11,7 @@ namespace XUnitExtensions.Lit {
   /// because 'diff' does not exist on Windows.
   /// </summary>
   public class DiffCommand : ILitCommand {
-    public static readonly bool UpdateExpectFile = false;
+    public static readonly bool UpdateExpectFile = Environment.GetEnvironmentVariable("DAFNY_INTEGRATION_TESTS_UPDATE_EXPECT_FILE") == "true";
 
     public string ExpectedPath { get; }
     public string ActualPath { get; }
@@ -40,16 +40,16 @@ namespace XUnitExtensions.Lit {
       return AssertWithDiff.GetDiffMessage(expected, actualOutput);
     }
 
-    public Task<int> Execute(TextReader inputReader,
+    public async Task<int> Execute(TextReader inputReader,
       TextWriter outputWriter, TextWriter errorWriter) {
-      var actual = File.ReadAllText(ActualPath);
+      var actual = await File.ReadAllTextAsync(ActualPath);
       var diffMessage = Run(ExpectedPath, actual);
       if (diffMessage != null) {
-        outputWriter.Write(diffMessage);
-        return Task.FromResult(1);
+        await outputWriter.WriteAsync(diffMessage);
+        return 1;
       }
 
-      return Task.FromResult(0);
+      return 0;
     }
 
     public override string ToString() {
