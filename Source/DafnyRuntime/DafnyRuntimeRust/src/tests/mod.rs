@@ -248,16 +248,16 @@ mod tests {
     impl <T: Clone + Display> ClassWrapper<T> {
         fn constructor(t: T) -> *mut ClassWrapper<T> {
             let this = crate::allocate::<ClassWrapper<T>>();
-            overwrite_field!(this, t, t);
-            overwrite_field!(this, next, this);
+            update_field_nodrop!(this, t, t);
+            update_field_nodrop!(this, next, this);
             // If x is assigned twice, we need to keep track of whether it's assigned
             // like in methods.
             let mut x_assigned = false;
-            uninit_assign_field!(this, x, x_assigned, int!(2));
-            uninit_assign_field!(this, x, x_assigned, int!(1));
+            update_field_uninit!(this, x, x_assigned, int!(2));
+            update_field_uninit!(this, x, x_assigned, int!(1));
             // If we can prove that x is assigned, we can even write this
             modify!(this).x = int!(0);
-            overwrite_field!(this, constant, int!(42));
+            update_field_nodrop!(this, constant, int!(42));
             this
         }
     }
@@ -322,10 +322,10 @@ mod tests {
         let mut t = var_uninit!(Rc<i32>);
         let mut t_assigned: bool = false;
         if test1 {
-            uninit_assign!(t, t_assigned, Rc::new(5 as i32));
+            update_uninit!(t, t_assigned, Rc::new(5 as i32));
         }
         if test2 {
-            uninit_assign!(t, t_assigned, Rc::new(7 as i32 + if test1 {*t} else {0}));
+            update_uninit!(t, t_assigned, Rc::new(7 as i32 + if test1 {*t} else {0}));
         }
         println!("{}", *t);
         assert!(t_assigned);

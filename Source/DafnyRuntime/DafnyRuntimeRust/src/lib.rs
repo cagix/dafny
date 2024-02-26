@@ -179,6 +179,12 @@ pub struct DafnyInt {
     data: Rc<BigInt>
 }
 
+impl AsRef<BigInt> for DafnyInt {
+    fn as_ref(&self) -> &BigInt {
+        &self.data
+    }
+}
+
 // truncate_u(x, u64)
 // = <DafnyInt as ToPrimitive>::to_u128(&x).unwrap() as u64;
 #[macro_export]
@@ -2146,18 +2152,18 @@ pub fn deallocate<T : ?Sized>(pointer: *const T) {
 // When initializing an uninitialized field for the first time,
 // we ensure we don't drop the previous content
 // This is problematic if the same field is overwritten multiple times
-/// In that case, prefer to use uninit_assign
+/// In that case, prefer to use update_uninit
 #[macro_export]
-macro_rules! overwrite_field {
+macro_rules! update_field_nodrop {
     ($ptr:expr, $field:ident, $value:expr) => {
-        overwrite!((*$ptr).$field, $value)
+        assign_nodrop!((*$ptr).$field, $value)
     }
 }
 
 // When initializing an uninitialized field for the first time,
 // we ensure we don't drop the previous content
 #[macro_export]
-macro_rules! overwrite {
+macro_rules! assign_nodrop {
     ($ptr:expr, $value:expr) => {
         unsafe { ::std::ptr::addr_of_mut!($ptr).write($value) }
     }
@@ -2192,31 +2198,31 @@ macro_rules! var_uninit {
     if t_assigned {
         t = computed_value;
     } else {
-        overwrite!(t, computed_value);
+        assign_nodrop!(t, computed_value);
         t_assigned = true;
     } */
 #[macro_export]
-macro_rules! uninit_assign {
+macro_rules! update_uninit {
     ($t:expr, $t_assigned:expr, $value:expr) => {
         let computed_value = $value;
         if $t_assigned {
             $t = computed_value;
         } else {
-            overwrite!($t, computed_value);
+            assign_nodrop!($t, computed_value);
             $t_assigned = true;
         }
     }
 }
 
-// If the field is guaranteed to be assigned only once, overwrite_field is sufficient
+// If the field is guaranteed to be assigned only once, update_field_nodrop is sufficient
 #[macro_export]
-macro_rules! uninit_assign_field {
+macro_rules! update_field_uninit {
     ($t:expr, $field:ident, $field_assigned:expr, $value:expr) => {
         let computed_value = $value;
         if $field_assigned {
             modify!($t).$field = computed_value;
         } else {
-            overwrite_field!($t, $field, computed_value);
+            update_field_nodrop!($t, $field, computed_value);
             $field_assigned = true;
         }
     }

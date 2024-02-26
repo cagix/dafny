@@ -1018,10 +1018,11 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
   // fn Test(i: &mut T) is map["i" := OwnershipBorrowedMut]
   datatype Environment = Environment(
     names: seq<string>,
-    ownerships: map<string, Ownership>)
+    ownerships: map<string, Ownership>,
+    assignment_tracker_var: map<string, string>)
   {
     static function Empty(): Environment {
-      Environment([], map[])
+      Environment([], map[], map[])
     }
     predicate IsBorrowed(name: string) {
       name in ownerships && ownerships[name] == OwnershipBorrowed
@@ -1030,7 +1031,14 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
       name in ownerships && ownerships[name] == OwnershipBorrowedMut
     }
     function Add(name: string, ownership: Ownership): Environment {
-      Environment(names + [name], ownerships[name := ownership])
+      Environment(names + [name], ownerships[name := ownership],
+        assignment_tracker_var := this.assignment_tracker_var)
+    }
+    // For fields, name contains "this.field_name"
+    // For uninitialized var and out vars, name contains the name of the variable
+    function Add_and_tracker(name: string, tracker_name: string): Environment {
+      Environment(names + [name, tracker_name], ownerships[name := OwnershipBorrowedMut][tracker_name := OwnershipOwned],
+        assignment_tracker_var := this.assignment_tracker_var[name := tracker_name])
     }
   }
 
