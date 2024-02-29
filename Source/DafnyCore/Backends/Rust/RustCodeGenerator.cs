@@ -9,7 +9,7 @@ namespace Microsoft.Dafny.Compilers {
 
     public DafnyOptions Options { get; set; }
 
-    public RustCompiler(DafnyOptions options) {
+    public RustCodeGenerator(DafnyOptions options) {
       this.Options = options;
     }
 

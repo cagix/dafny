@@ -304,7 +304,7 @@ namespace Microsoft.Dafny.Compilers {
       ISequence<ISequence<Rune>> overridingPath,
       string name,
       List<DAST.Type> typeArgs,
-      List<DAST.Formal> params_,
+      Sequence<DAST.Formal> params_,
       List<DAST.Type> outTypes, List<ISequence<Rune>> outVars
     ) {
       return new MethodBuilder(this, isStatic, hasBody, overridingPath, name, typeArgs, params_, outTypes, outVars);
@@ -320,7 +320,7 @@ namespace Microsoft.Dafny.Compilers {
     readonly bool hasBody;
     readonly ISequence<ISequence<Rune>> overridingPath;
     readonly List<DAST.Type> typeArgs;
-    readonly List<DAST.Formal> params_;
+    readonly Sequence<DAST.Formal> params_;
     readonly List<DAST.Type> outTypes;
     readonly List<ISequence<Rune>> outVars;
     readonly List<object> body = new();
@@ -331,7 +331,7 @@ namespace Microsoft.Dafny.Compilers {
       ISequence<ISequence<Rune>> overridingPath,
       string name,
       List<DAST.Type> typeArgs,
-      List<DAST.Formal> params_,
+      Sequence<DAST.Formal> params_,
       List<DAST.Type> outTypes, List<ISequence<Rune>> outVars
     ) {
       this.parent = parent;
@@ -369,7 +369,7 @@ namespace Microsoft.Dafny.Compilers {
         overridingPath != null ? Option<ISequence<ISequence<Rune>>>.create_Some(overridingPath) : Option<ISequence<ISequence<Rune>>>.create_None(),
         Sequence<Rune>.UnicodeFromString(this.name),
         Sequence<DAST.Type>.FromArray(typeArgs.ToArray()),
-        Sequence<DAST.Formal>.FromArray(params_.ToArray()),
+        params_,
         Sequence<DAST.Statement>.FromArray(builtStatements.ToArray()),
         Sequence<DAST.Type>.FromArray(outTypes.ToArray()),
         outVars != null ? Option<ISequence<ISequence<Rune>>>.create_Some(Sequence<ISequence<Rune>>.FromArray(outVars.ToArray())) : Option<ISequence<ISequence<Rune>>>.create_None()
@@ -450,8 +450,8 @@ namespace Microsoft.Dafny.Compilers {
       return ret;
     }
 
-    public CallStmtBuilder Call() {
-      var ret = new CallStmtBuilder();
+    public CallStmtBuilder Call(ISequence<_IFormal> signature) {
+      var ret = new CallStmtBuilder(signature);
       AddBuildable(ret);
       return ret;
     }
@@ -527,7 +527,8 @@ namespace Microsoft.Dafny.Compilers {
 
     public DAST.Statement Build() {
       if (this.value == null) {
-        return (DAST.Statement)DAST.Statement.create_DeclareVar(Sequence<Rune>.UnicodeFromString(name), type, Option<DAST._IExpression>.create_None());
+        return (DAST.Statement)DAST.Statement.create_DeclareVar(
+          Sequence<Rune>.UnicodeFromString(name), type, Option<DAST._IExpression>.create_None());
       } else {
         var builtValue = new List<DAST.Expression>();
         ExprContainer.RecursivelyBuild(new List<object> { value }, builtValue);
@@ -853,8 +854,11 @@ namespace Microsoft.Dafny.Compilers {
     List<DAST.Type> typeArgs = null;
     readonly List<object> args = new();
     List<ISequence<Rune>> outs = null;
+    public readonly ISequence<_IFormal> Signature;
 
-    public CallStmtBuilder() { }
+    public CallStmtBuilder(ISequence<_IFormal> signature) {
+      this.Signature = signature;
+    }
 
     public void SetName(CallName name) {
       if (this.name != null) {
@@ -1114,8 +1118,8 @@ namespace Microsoft.Dafny.Compilers {
       return ret;
     }
 
-    CallExprBuilder Call() {
-      var ret = new CallExprBuilder();
+    CallExprBuilder Call(ISequence<_IFormal> signature) {
+      var ret = new CallExprBuilder(signature);
       AddBuildable(ret);
       return ret;
     }
@@ -1298,7 +1302,11 @@ namespace Microsoft.Dafny.Compilers {
     readonly List<object> args = new();
     List<ISequence<Rune>> outs = null;
 
-    public CallExprBuilder() { }
+    public ISequence<_IFormal> Signature { get; }
+
+    public CallExprBuilder(ISequence<_IFormal> signature) {
+      Signature = signature;
+    }
 
     public void SetName(DAST.CallName name) {
       if (this.name != null) {

@@ -342,5 +342,58 @@ mod tests {
         t = assign_lazy_in_method(true, true);
         assert_eq!(*t, 12);
     }
+
+    // Uninitialized variables must be forgotten, otherwise Rust will try to clean them
+    // up and it will result in segfaults.
+    fn assign_possibly_uninit(return_noassign: bool, update_if_continue: bool) -> Rc<i32> {
+        let mut t = var_uninit!(Rc<i32>);
+        if return_noassign {
+            forget!(t);
+            return Rc::new(2);
+        }
+        let mut t_assigned: bool = false;
+        if update_if_continue {
+            update_uninit!(t, t_assigned, Rc::new(5 as i32));
+        }
+        forget_uninit!(t, t_assigned);
+        Rc::new(1)
+    }
+    
+    #[test]
+    fn assign_possibly_uninit_test() {
+        let mut t = assign_possibly_uninit(true, true);
+        assert_eq!(*t, 2);
+        t = assign_possibly_uninit(false, true);
+        assert_eq!(*t, 1);
+        t = assign_possibly_uninit(false, false);
+        assert_eq!(*t, 1);
+    }
+
+    fn override_placebo<T: Clone>(o: T, do_override: bool) {
+        let mut x: MaybePlacebo<T> = MaybePlacebo::<T>::new();
+        if do_override {
+            x = MaybePlacebo::from(o.clone());
+        }
+    }
+
+    #[test]
+    fn test_placebo() {
+        override_placebo::<Rc<BigInt>>(Rc::new(BigInt::from(1)), false);
+        override_placebo::<Rc<BigInt>>(Rc::new(BigInt::from(1)), true);
+        override_placebo::<DafnyInt>(int!(1), false);
+        override_placebo::<DafnyInt>(int!(1), true);
+        let _x: MaybePlacebo<*mut ClassWrapper<DafnyInt>> = MaybePlacebo::<*mut ClassWrapper<DafnyInt>>::new();
+        //let mut f: Rc<dyn Fn(Class) -> Class> = <Rc<dyn Fn(Class) -> Class> as Placebo>::new();
+    }
+
+    #[test]
+    fn test_maybe_placebos_from() {
+        let x = (1, 2, 3, 4);
+        let (a, b, c, d) = maybe_placebos_from!(x, 0, 1, 2, 3);
+        assert_eq!(a.read(), 1);
+        assert_eq!(b.read(), 2);
+        assert_eq!(c.read(), 3);
+        assert_eq!(d.read(), 4);
+    }
 }
 // Struct containing two reference-counted fields

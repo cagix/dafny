@@ -28,6 +28,10 @@ else
 fi
 
 ../../Scripts/dafny translate cs dfyconfig.toml --output $output.cs $noverify
+# Exit with error code if the previous command fails
+if [ $? -ne 0 ]; then
+  exit 1
+fi
 
 # We will remove all the namespaces Std.* except Std.Wrappers
 python3 -c "

@@ -1,8 +1,10 @@
 #[cfg(test)]
 mod tests;
-use std::{any::Any, borrow::Borrow, cell::{RefCell, UnsafeCell}, cmp::Ordering, collections::{HashMap, HashSet}, fmt::{Debug, Display, Formatter}, hash::{Hash, Hasher}, mem::MaybeUninit, ops::{Add, Deref, Div, Mul, Neg, Rem, Sub}, rc::Rc};
+use std::{any::Any, borrow::Borrow, mem, cell::{RefCell, UnsafeCell}, cmp::Ordering, collections::{HashMap, HashSet}, fmt::{Debug, Display, Formatter}, hash::{Hash, Hasher}, ops::{Add, Deref, Div, Mul, Neg, Rem, Sub}, rc::Rc};
+use as_any::Downcast;
 use num::{bigint::ParseBigIntError, Integer, Num, One, Signed};
 pub use once_cell::unsync::Lazy;
+pub use mem::MaybeUninit;
 
 pub use num::bigint::BigInt;
 pub use num::rational::BigRational;
@@ -178,6 +180,12 @@ pub struct DafnyInt {
     data: Rc<BigInt>
 }
 
+impl DafnyInt {
+    fn new(data: Rc<BigInt>) -> DafnyInt {
+        DafnyInt{data}
+    }
+}
+
 impl AsRef<BigInt> for DafnyInt {
     fn as_ref(&self) -> &BigInt {
         &self.data
@@ -268,7 +276,7 @@ impl DafnyTypeEq for DafnyInt {}
 
 impl Default for DafnyInt {
     fn default() -> Self {
-        DafnyInt{data: Rc::new(BigInt::zero())}
+        DafnyInt::new(Rc::new(BigInt::zero()))
     }
 }
 
@@ -2158,14 +2166,14 @@ pub fn deallocate<T : ?Sized>(pointer: *const T) {
 #[macro_export]
 macro_rules! update_field_nodrop {
     ($ptr:expr, $field:ident, $value:expr) => {
-        assign_nodrop!((*$ptr).$field, $value)
+        $crate::update_nodrop!((*$ptr).$field, $value)
     }
 }
 
 // When initializing an uninitialized field for the first time,
 // we ensure we don't drop the previous content
 #[macro_export]
-macro_rules! assign_nodrop {
+macro_rules! update_nodrop {
     ($ptr:expr, $value:expr) => {
         unsafe { ::std::ptr::addr_of_mut!($ptr).write($value) }
     }
@@ -2192,7 +2200,7 @@ macro_rules! read {
 #[macro_export]
 macro_rules! var_uninit {
     ($tpe:ty) => {
-        unsafe { ::std::mem::transmute::<MaybeUninit::<$tpe>, $tpe>(MaybeUninit::<$tpe>::uninit()) }
+        unsafe { $crate::MaybeUninit::<$tpe>::uninit().assume_init() }
     }
 }
 //  assign_maybe_uninit!(t, t_assigned, value)
@@ -2200,18 +2208,20 @@ macro_rules! var_uninit {
     if t_assigned {
         t = computed_value;
     } else {
-        assign_nodrop!(t, computed_value);
+        update_nodrop!(t, computed_value);
         t_assigned = true;
     } */
 #[macro_export]
 macro_rules! update_uninit {
     ($t:expr, $t_assigned:expr, $value:expr) => {
-        let computed_value = $value;
-        if $t_assigned {
-            $t = computed_value;
-        } else {
-            assign_nodrop!($t, computed_value);
-            $t_assigned = true;
+        {
+            let computed_value = $value;
+            if $t_assigned {
+                $t = computed_value;
+            } else {
+                $crate::update_nodrop!($t, computed_value);
+                $t_assigned = true;
+            }
         }
     }
 }
@@ -2222,10 +2232,82 @@ macro_rules! update_field_uninit {
     ($t:expr, $field:ident, $field_assigned:expr, $value:expr) => {
         let computed_value = $value;
         if $field_assigned {
-            modify!($t).$field = computed_value;
+            $crate::modify!($t).$field = computed_value;
         } else {
-            update_field_nodrop!($t, $field, computed_value);
+            $crate::update_field_nodrop!($t, $field, computed_value);
             $field_assigned = true;
+        }
+    }
+}
+
+// Don't run the destructor, i.e. on a value that was surely never initialized
+#[macro_export]
+macro_rules! forget {
+    ($t:expr) => {
+        ::std::mem::forget($t)
+    }
+}
+
+// Don't run the destructor, on a value that was possibly never initialized
+#[macro_export]
+macro_rules! forget_uninit {
+    ($t:expr, $field_assigned:expr) => {
+        if !$field_assigned {
+            $crate::forget!($t);
+        }
+    }
+}
+
+/////////////////
+// Method helpers
+/////////////////
+
+
+// A MaybePlacebo is a value that is either a placebo or a real value.
+// It is a wrapper around a MaybeUninit<T> value, but knowing whether the value is a placebo or not.
+// That way, when it is dropped, the underlying value is only dropped if it is not a placebo.
+pub struct MaybePlacebo<T>(Option<T>);
+impl <T: Clone> MaybePlacebo<T> {
+    #[inline]
+    pub fn read(&self) -> T {
+        // Dafny will guarantee we will never read a placebo value
+        /*if self.is_placebo {
+            panic!("Tried to read placebo value!");
+        }*/
+        unsafe {self.0.clone().unwrap_unchecked()}
+    }
+}
+
+impl <T> MaybePlacebo<T> {
+    #[inline]
+    pub fn new() -> Self {
+        MaybePlacebo(None)
+    }
+    #[inline]
+    pub fn from(v: T) -> Self {
+        MaybePlacebo(Some(v))
+    }
+}
+
+#[macro_export]
+macro_rules! tuple_extract_index {
+    ($x:expr, $i:expr) => {
+        $x.$i
+    }
+}
+
+// A macro that maps tuple (a, b, c...) to produce (MaybePlacebo::from(a), MaybePlacebo::from(b), MaybePlacebo::from(c))
+// maybe_placebos_from!(expr, 0, 1, 2, 3)
+// = let x = expr;
+//   (MaybePlacebo::from(x.0), MaybePlacebo::from(x.1), MaybePlacebo::from(x.2), MaybePlacebo::from(x.3))
+#[macro_export]
+macro_rules! maybe_placebos_from {
+    ($x:expr, $($i:tt), *) => {
+        {
+            let x = $x;
+            (
+                $( $crate::MaybePlacebo::from(x.$i), )*
+            )
         }
     }
 }

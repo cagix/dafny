@@ -79,8 +79,10 @@ module {:extern "DAST"} DAST {
 
   datatype Method = Method(isStatic: bool, hasBody: bool, overridingPath: Option<seq<Ident>>, name: string, typeParams: seq<Type>, params: seq<Formal>, body: seq<Statement>, outTypes: seq<Type>, outVars: Option<seq<Ident>>)
 
+  datatype CallSignature = CallSignature(parameters: seq<Formal>)
+
   datatype CallName =
-    Name(name: string) |
+    Name(name: string, signature: CallSignature) |
     MapBuilderAdd | MapBuilderBuild | SetBuilderAdd | SetBuilderBuild
 
   datatype Statement =
@@ -100,7 +102,7 @@ module {:extern "DAST"} DAST {
     Print(Expression)
 
   datatype AssignLhs =
-    Ident(Ident) |
+    Ident(ident: Ident) |
     Select(expr: Expression, field: string) |
     Index(expr: Expression, indices: seq<Expression>)
 

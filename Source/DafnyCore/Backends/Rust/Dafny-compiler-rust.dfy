@@ -11,6 +11,7 @@ module RAST
   import opened DAST.Format
   import Strings = Std.Strings
 
+  // Default Indentation
   const IND := "  "
 
   datatype Mod =
@@ -213,6 +214,7 @@ module RAST
   datatype Type =
     | SelfOwned
     | U8 | U16 | U32 | U64 | U128 | I8 | I16 | I32 | I64 | I128
+    | Bool
     | TIdentifier(name: string)
     | TMemberSelect(base: Type, name: string)
     | TypeApp(baseName: Type, arguments: seq<Type>)
@@ -224,8 +226,25 @@ module RAST
     | FnType(arguments: seq<Type>, returnType: Type)
     | IntersectionType(left: Type, right: Type)
   {
+    predicate HasCopySemantics() {
+      U8? || U16? || U32? || U64? || U128? || I8? || I16? || I32? || I64? || I128? || Bool?
+    }
+    function ExtractMaybePlacebo(): Option<Type> {
+      match this {
+        case TypeApp(wrapper, arguments) =>
+          if (wrapper == TIdentifier("MaybePlacebo")
+              || wrapper == dafny_runtime_type.MSel("MaybePlacebo"))
+              && |arguments| == 1
+          then
+            Some(arguments[0])
+          else
+            None
+        case _ => None
+      }
+    }
     function ToString(ind: string): string {
       match this {
+        case Bool() => "bool"
         case TIdentifier(underlying) => underlying
         case TMemberSelect(underlying, name) => underlying.ToString(ind) + "::" + name
         case Borrowed(underlying) => "&" + underlying.ToString(ind)
@@ -287,6 +306,11 @@ module RAST
   const cell_type := std_type.MSel("cell")
   const refcell_type := cell_type.MSel("RefCell")
   const dafny_runtime_type := global_type.MSel("dafny_runtime")
+
+  function MaybePlaceboType(underlying: Type): Type {
+    dafny_runtime_type.MSel("MaybePlacebo").Apply1(underlying)
+  }
+
 
   datatype Trait =
     | Trait(typeParams: seq<TypeParam>, tpe: Type, where: string, body: seq<ImplMember>)
@@ -443,6 +467,9 @@ module RAST
     }
   }
 
+  function AssignVar(name: string, rhs: Expr): Expr {
+    Expr.Assign([name], rhs)
+  }
 
   datatype Expr =
       RawExpr(content: string)
@@ -457,9 +484,10 @@ module RAST
     | BinaryOp(op2: string, left: Expr, right: Expr, format2: Format.BinOpFormat)
     | TypeAscription(left: Expr, tpe: Type)          // underlying as tpe
     | LiteralInt(value: string)
+    | LiteralBool(bvalue: bool)
     | LiteralString(value: string, binary: bool)
     | DeclareVar(declareType: DeclareType, name: string, optType: Option<Type>, optRhs: Option<Expr>) // let mut name: optType = optRhs;
-    | AssignVar(name: string, rhs: Expr)             // name = rhs;
+    | Assign(names: seq<string>, rhs: Expr)           // name1, name2 = rhs;
     | IfExpr(cond: Expr, thn: Expr, els: Expr)       // if cond { thn } else { els }
     | Loop(optCond: Option<Expr>, underlying: Expr)  // loop { body }
     | For(name: string, range: Expr, body: Expr)     // for name in range { body }
@@ -473,7 +501,7 @@ module RAST
     | MemberSelect(obj: Expr, name: string)          // obj::name
   {
     predicate NoExtraSemicolonAfter() {
-      DeclareVar? || AssignVar? || Break? || Continue? || Return? ||
+      DeclareVar? || Assign? || Break? || Continue? || Return? ||
       (RawExpr? && |content| > 0 && content[|content| - 1] == ';')
     }
     // Taken from https://doc.rust-lang.org/reference/expressions.html
@@ -483,6 +511,7 @@ module RAST
         case ExprFromType(_) => Precedence(1)
         case Identifier(_) => Precedence(1)
         case LiteralInt(_) => Precedence(1)
+        case LiteralBool(_) => Precedence(1)
         case LiteralString(_, _) => Precedence(1)
         // Paths => Precedence(1)
         // Method call => Precedence(2)
@@ -524,6 +553,7 @@ module RAST
         case Identifier(_) => 1
         case ExprFromType(_) => 1
         case LiteralInt(_) => 1
+        case LiteralBool(_) => 1
         case LiteralString(_, _) => 1
         case Match(matchee, cases) =>
           1 + max(matchee.Height(),
@@ -533,8 +563,8 @@ module RAST
         case StmtExpr(stmt, rhs) =>
           var default := 1 + max(stmt.Height(), rhs.Height());
           match this {
-            case StmtExpr(DeclareVar(mod, name, Some(tpe), None), StmtExpr(AssignVar(name2, rhs), last)) =>
-              if name == name2 then
+            case StmtExpr(DeclareVar(mod, name, Some(tpe), None), StmtExpr(Assign(name2, rhs), last)) =>
+              if [name] == name2 then
                 1 + default
               else default
             case StmtExpr(IfExpr(UnaryOp("!", BinaryOp("==", a, b, f), of), RawExpr("panic!(\"Halt\");"), RawExpr("")), last) =>
@@ -564,7 +594,7 @@ module RAST
                  case Some(e) => e.Height()
                  case None => 0
                })
-        case AssignVar(name, expr) =>
+        case Assign(names, expr) =>
           1 + expr.Height()
         case Loop(optCond, underlying) =>
           1 + if optCond.Some? then max(optCond.value.Height(), underlying.Height()) else underlying.Height()
@@ -648,12 +678,12 @@ module RAST
             }
           else
             this
-        case StmtExpr(DeclareVar(mod, name, Some(tpe), None), StmtExpr(AssignVar(name2, rhs), last)) =>
-          if name == name2 then
+        case StmtExpr(DeclareVar(mod, name, Some(tpe), None), StmtExpr(Assign(name2, rhs), last)) =>
+          if [name] == name2 then
             var rewriting := StmtExpr(DeclareVar(mod, name, Some(tpe), Some(rhs)), last);
             assert rewriting.Height() < this.Height() by {
-              assert StmtExpr(AssignVar(name2, rhs), last).Height() ==
-                     1 + max(AssignVar(name2, rhs).Height(), last.Height()) ==
+              assert StmtExpr(Assign(name2, rhs), last).Height() ==
+                     1 + max(Assign(name2, rhs).Height(), last.Height()) ==
                      1 + max(1 + rhs.Height(), last.Height());
               assert this.Height() == 2 + max(1, 1 + max(1 + rhs.Height(), last.Height()));
               assert rewriting.Height() == 1 + max(1 + rhs.Height(), last.Height());
@@ -705,6 +735,7 @@ module RAST
         case Identifier(name) => name
         case ExprFromType(t) => t.ToString(ind)
         case LiteralInt(number) => number
+        case LiteralBool(b) => if b then "true" else "false"
         case LiteralString(characters, binary) =>
           (if binary then "b" else "") +
           "\"" + characters + "\""
@@ -774,8 +805,11 @@ module RAST
                  case _ => "Another case"
                }
              else " = " + optExprString else "") + ";"
-        case AssignVar(name, expr) =>
-          name + " = " + expr.ToString(ind + IND) + ";"
+        case Assign(names, expr) =>
+          var lhs := if |names| == 1 then names[0] + " = "
+            else if |names| == 0 then "_ = "
+            else "(" + SeqToString(names, (name: string) => name, ",") + ") = ";
+          lhs + expr.ToString(ind + IND) + ";"
         case Labelled(name, underlying) =>
           "'" + name + ": " + underlying.ToString(ind)
         case Break(optLbl) =>
@@ -829,6 +863,8 @@ module RAST
     function Then(rhs2: Expr): Expr {
       if this.StmtExpr? then
         StmtExpr(stmt, rhs.Then(rhs2))
+      else if this == RawExpr("") then
+        rhs2
       else
         StmtExpr(this, rhs2)
     }
@@ -868,6 +904,9 @@ module RAST
   const Sequence_from_array := dafny_runtime_Sequence.MSel("from_array")
   const dafny_runtime_Multiset := dafny_runtime.MSel("Multiset")
   const dafny_runtime_Multiset_from_array := dafny_runtime_Multiset.MSel("from_array")
+  function MaybePlacebo(underlying: Expr): Expr {
+    dafny_runtime.MSel("MaybePlacebo").MSel("from").Apply1(underlying)
+  }
 
   const std := global.MSel("std")
 
@@ -876,6 +915,8 @@ module RAST
   const std_rc_Rc := std_rc.MSel("Rc")
 
   const std_rc_Rc_new := std_rc_Rc.MSel("new")
+
+  const std_Default_default := std.MSel("default").MSel("Default").MSel("default").Apply([])
 
   function RcNew(underlying: Expr): Expr {
     Call(std_rc_Rc_new, [underlying])
@@ -1012,33 +1053,39 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
   const DafnyChar := if UnicodeChars then "DafnyChar" else "DafnyCharUTF16"
   const DafnyCharUnderlying := if UnicodeChars then R.RawType("char") else R.RawType("u16")
 
-  // Mapping from names to their ownership with which they were assigned.
-  // fn Test(i: T) is map["i" := OwnershipOwned]
-  // fn Test(i: &T) is map["i" := OwnershipBorrowed]
-  // fn Test(i: &mut T) is map["i" := OwnershipBorrowedMut]
+  datatype UnassignedStatus = Unassigned | WithTracker(tracker_name: string)
+
+  // types stores the Rust type per Rust name.
+  // fn Test<T>(i: T) is map["i" := R.RawType("T")]
+  // fn Test(i: &T) is map["i" := R.Borrowed(...)]
+  // fn Test(i: &mut T) is map["i" := R.BorrowedMut(...)]
+  
   datatype Environment = Environment(
-    names: seq<string>,
-    ownerships: map<string, Ownership>,
-    assignment_tracker_var: map<string, string>)
-  {
+    names: seq<string>,                 // All variable names, after escape, in Rust
+    types: map<string, R.Type>
+  ) {
     static function Empty(): Environment {
-      Environment([], map[], map[])
+      Environment([], map[])
+    }
+    opaque predicate HasCopySemantics(name: string) {
+      name in types && types[name].HasCopySemantics()
+    }
+    opaque predicate HasCloneSemantics(name: string) {
+      !HasCopySemantics(name)
+    }
+    function GetType(name: string): Option<R.Type> {
+      if name in types then Some(types[name]) else None
     }
     predicate IsBorrowed(name: string) {
-      name in ownerships && ownerships[name] == OwnershipBorrowed
+      name in types && types[name].Borrowed?
     }
     predicate IsBorrowedMut(name: string) {
-      name in ownerships && ownerships[name] == OwnershipBorrowedMut
+      name in types && types[name].BorrowedMut?
     }
-    function Add(name: string, ownership: Ownership): Environment {
-      Environment(names + [name], ownerships[name := ownership],
-        assignment_tracker_var := this.assignment_tracker_var)
-    }
-    // For fields, name contains "this.field_name"
-    // For uninitialized var and out vars, name contains the name of the variable
-    function Add_and_tracker(name: string, tracker_name: string): Environment {
-      Environment(names + [name, tracker_name], ownerships[name := OwnershipBorrowedMut][tracker_name := OwnershipOwned],
-        assignment_tracker_var := this.assignment_tracker_var[name := tracker_name])
+    function AddAssigned(name: string, tpe: R.Type): Environment
+      // If we know for sure the type of name extends the Copy trait
+    {
+      Environment(names + [name], types[name := tpe])
     }
   }
 
@@ -1128,11 +1175,11 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
           }
           case None => {
             var RefCellNew := R.std.MSel("cell").MSel("RefCell").MSel("new");
-            var default := R.std.MSel("default").MSel("Default").MSel("default");
+            var default := R.std_Default_default;
             fieldInits := fieldInits + [
               R.AssignIdentifier(
                 escapeIdent(field.formal.name),
-                RefCellNew.Apply1(default.Apply([])))];
+                RefCellNew.Apply1(default))];
           }
         }
 
@@ -1235,7 +1282,7 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
              R.PRIV,
              R.Fn(
                "fmt_print", [],
-               [R.Formal.selfBorrowed, R.Formal("_formatter", R.RawType("&mut ::std::fmt::Formatter")), R.Formal("_in_seq", R.RawType("bool"))],
+               [R.Formal.selfBorrowed, R.Formal("_formatter", R.RawType("&mut ::std::fmt::Formatter")), R.Formal("_in_seq", R.Type.Bool)],
                Some(R.RawType("std::fmt::Result")),
                "",
                Some(R.RawExpr("write!(_formatter, \"" + c.enclosingModule.id + "." + c.name + "\")"))
@@ -1253,7 +1300,7 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
            R.Fn(
              "eq", [],
              [R.Formal.selfBorrowed, R.Formal("other", R.SelfBorrowed)],
-             Some(R.RawType("bool")),
+             Some(R.Type.Bool),
              "",
              Some(R.RawExpr("::std::ptr::eq(self, other)"))
            ))]
@@ -1300,6 +1347,8 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
         case None =>
           underlyingType := GenType(c.base, false, false);
       }
+      var resultingType :=
+        Path([], [], ResolvedType.Newtype(c.base, c.range, false, c.attributes));
       var datatypeName := escapeIdent(c.name);
       s := [
         R.StructDecl(
@@ -1313,16 +1362,17 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
             R.NamelessFormals([R.NamelessFormal(R.PUB, underlyingType)])
           ))];
 
-      var fnBody := "";
+      var fnBody := R.Identifier(datatypeName);
 
       match c.witnessExpr {
         case Some(e) => {
-          // TODO(shadaj): generate statements
+          var e := if c.base == resultingType then e else Convert(e, c.base, resultingType);
+          // TODO(Mikael): generate statements if any
           var eStr, _, _ := GenExpr(e, None, Environment.Empty(), OwnershipOwned);
-          fnBody := fnBody + datatypeName + "(" + eStr.ToString(IND) + ")\n";
+          fnBody := fnBody.Apply1(eStr);
         }
         case None => {
-          fnBody := fnBody + datatypeName + "(::std::default::Default::default())";
+          fnBody := fnBody.Apply1(R.std_Default_default);
         }
       }
 
@@ -1332,7 +1382,7 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
           R.Fn(
             "default", [], [], Some(R.SelfOwned),
             "",
-            Some(R.RawExpr(fnBody))
+            Some(fnBody)
           ));
       s := s + [
         R.ImplDecl(
@@ -1343,14 +1393,16 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
             whereConstraints,
             [body]))];
       s := s + [
-        R.ImplDecl(R.ImplFor(
+        R.ImplDecl(
+          R.ImplFor(
                      sConstrainedTypeParams,
                      R.DafnyPrintTrait,
                      R.TypeApp(R.TIdentifier(datatypeName), typeParamsAsTypes),
                      "",
-                     [R.FnDecl(R.PRIV,
+                     [R.FnDecl(
+                      R.PRIV,
                                R.Fn("fmt_print", [],
-                                    [R.Formal.selfBorrowed, R.Formal("_formatter", R.RawType("&mut ::std::fmt::Formatter")), R.Formal("in_seq", R.RawType("bool"))],
+                                    [R.Formal.selfBorrowed, R.Formal("_formatter", R.RawType("&mut ::std::fmt::Formatter")), R.Formal("in_seq", R.Type.Bool)],
                                     Some(R.RawType("::std::fmt::Result")),
                                     "",
                                     Some(R.RawExpr("::dafny_runtime::DafnyPrint::fmt_print(&self.0, _formatter, in_seq)"))
@@ -1564,7 +1616,7 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
                R.PRIV,
                R.Fn(
                  "fmt_print", [],
-                 [R.Formal.selfBorrowed, R.Formal("_formatter", R.RawType("&mut ::std::fmt::Formatter")), R.Formal("_in_seq", R.RawType("bool"))],
+                 [R.Formal.selfBorrowed, R.Formal("_formatter", R.RawType("&mut ::std::fmt::Formatter")), R.Formal("_in_seq", R.Type.Bool)],
                  Some(R.RawType("std::fmt::Result")),
                  "",
                  Some(printImplBody)))]
@@ -1782,7 +1834,7 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
             case Real => s := R.dafny_runtime_type.MSel("BigRational");
             case String => s := R.TypeApp(R.dafny_runtime_type.MSel("Sequence"),
                                           [R.dafny_runtime_type.MSel(DafnyChar)]);
-            case Bool => s := R.RawType("bool");
+            case Bool => s := R.Type.Bool;
             case Char => s := R.dafny_runtime_type.MSel(DafnyChar);
           }
         }
@@ -1823,13 +1875,18 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
       }
     }
 
-    static method GenParams(params: seq<Formal>) returns (s: seq<R.Formal>) {
+    static method GenParams(params: seq<Formal>) returns (s: seq<R.Formal>)
+      ensures |s| == |params|
+    {
       s := [];
       var i := 0;
-      while i < |params| {
+      while i < |params| invariant |s| == i && i <= |params| {
         var param := params[i];
         var paramType := GenType(param.typ, false, false);
-        s := s + [R.Formal(escapeIdent(param.name), R.Borrowed(paramType))];
+        if !paramType.HasCopySemantics() {
+          paramType := R.Borrowed(paramType);
+        }
+        s := s + [R.Formal(escapeIdent(param.name), paramType)];
         i := i + 1;
       }
     }
@@ -1837,15 +1894,14 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
     static method GenMethod(m: Method, forTrait: bool, enclosingType: Type, enclosingTypeParams: set<Type>) returns (s: R.ImplMember) {
       var params: seq<R.Formal> := GenParams(m.params);
       var paramNames := [];
-      var paramOwnerships := map[];
-      var paramI := 0;
-      while paramI < |m.params| {
-        var name := m.params[paramI].name;
+      var paramTypes := map[];
+      for paramI := 0 to |m.params| {
+        var dafny_formal := m.params[paramI];
+        var formal := params[paramI];
+        var name := formal.name;
         paramNames := paramNames + [name];
-        paramOwnerships := paramOwnerships[name := OwnershipBorrowed];
-        paramI := paramI + 1;
+        paramTypes := paramTypes[name := formal.tpe];
       }
-      var env := Environment(paramNames, paramOwnerships);
 
       if (!m.isStatic) {
         if (forTrait) {
@@ -1906,6 +1962,7 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
       }
 
       var fBody: Option<R.Expr>;
+      var env: Environment;
 
       if m.hasBody {
         var earlyReturn: R.Expr := R.Return(None);
@@ -1913,24 +1970,35 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
           case Some(outVars) => {
 
             var tupleArgs := [];
+            assume {:axiom} |m.outTypes| == |outVars|;
 
-            var outI := 0;
-            while outI < |outVars| {
-
+            for outI := 0 to |outVars| {
               var outVar := outVars[outI];
-              tupleArgs := tupleArgs + [R.Identifier(escapeIdent(outVar.id))];
+              var outType := GenType(m.outTypes[outI], false, false);
+              var outName := escapeIdent(outVar.id);
+              paramNames := paramNames + [outName];
+              var outMaybeType := if outType.HasCopySemantics() then outType else R.MaybePlaceboType(outType);
+              paramTypes := paramTypes[outName := outMaybeType];
 
-              outI := outI + 1;
+              var outVarReturn, _, _ := GenExpr(Expression.Ident(outVar.id), None,
+                Environment([outName], map[outName := outMaybeType]), OwnershipOwned);
+              tupleArgs := tupleArgs + [outVarReturn];
             }
-            earlyReturn := R.Return(Some(R.Tuple(tupleArgs)));
+            if |tupleArgs| == 1 {
+              earlyReturn := R.Return(Some(tupleArgs[0]));
+            } else {
+              earlyReturn := R.Return(Some(R.Tuple(tupleArgs)));
+            }
           }
           case None => {}
         }
+        env := Environment(paramNames, paramTypes);
 
-        var body, _ := GenStmts(m.body, if m.isStatic then None else Some("self"), env, true, earlyReturn);
+        var body, _, _ := GenStmts(m.body, if m.isStatic then None else Some("self"), env, true, earlyReturn);
 
         fBody := Some(body);
       } else {
+        env := Environment(paramNames, paramTypes);
         fBody := None;
       }
       s := R.FnDecl(
@@ -1946,17 +2014,19 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
       );
     }
 
-    static method GenStmts(stmts: seq<Statement>, selfIdent: Option<string>, env: Environment, isLast: bool, earlyReturn: R.Expr) returns (generated: R.Expr, readIdents: set<string>)
-      decreases stmts, 1
+    static method GenStmts(stmts: seq<Statement>, selfIdent: Option<string>, env: Environment, isLast: bool, earlyReturn: R.Expr) returns (generated: R.Expr, readIdents: set<string>, newEnv: Environment)
+      decreases stmts, 1, 0
     {
       generated := R.RawExpr("");
       var declarations := {};
       readIdents := {};
       var i := 0;
+      newEnv := env;
       while i < |stmts| {
         var stmt := stmts[i];
-        var stmtExpr, recIdents := GenStmt(stmt, selfIdent, env, isLast && (i == |stmts| - 1), earlyReturn);
+        var stmtExpr, recIdents, newEnv2 := GenStmt(stmt, selfIdent, newEnv, isLast && (i == |stmts| - 1), earlyReturn);
         readIdents := readIdents + (recIdents - declarations);
+        newEnv := newEnv2;
 
         match stmt {
           case DeclareVar(name, _, _) => {
@@ -2022,27 +2092,36 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
       }
     }
 
-    static method GenStmt(stmt: Statement, selfIdent: Option<string>, env: Environment, isLast: bool, earlyReturn: R.Expr) returns (generated: R.Expr, readIdents: set<string>)
-      decreases stmt, 1
+    static method GenStmt(stmt: Statement, selfIdent: Option<string>, env: Environment, isLast: bool, earlyReturn: R.Expr) returns (generated: R.Expr, readIdents: set<string>, newEnv: Environment)
+      decreases stmt, 1, 1
     {
       match stmt {
         case DeclareVar(name, typ, Some(expression)) => {
-          var typeString := GenType(typ, true, false);
-          var expr, _, recIdents := GenExpr(expression, selfIdent, env, OwnershipOwned);
-
-          generated := R.DeclareVar(R.MUT, escapeIdent(name), Some(typeString), Some(expr));
-          readIdents := recIdents;
+          var tpe := GenType(typ, true, false);
+          var varName := escapeIdent(name);
+          var hasCopySemantics := tpe.HasCopySemantics();
+          if expression.InitializationValue? && !hasCopySemantics {
+            generated := R.DeclareVar(R.MUT, varName, None, Some(R.dafny_runtime.MSel("MaybePlacebo").ApplyType1(tpe).MSel("new").Apply([])));
+            readIdents := {};
+            newEnv := env.AddAssigned(varName, R.MaybePlaceboType(tpe));
+          } else {
+            var expr, _, recIdents := GenExpr(expression, selfIdent, env, OwnershipOwned);
+            readIdents := recIdents;
+            generated := R.DeclareVar(R.MUT, escapeIdent(name), Some(tpe), Some(expr));
+            newEnv := env.AddAssigned(escapeIdent(name), tpe);
+          }
         }
         case DeclareVar(name, typ, None) => {
-          var typeString := GenType(typ, true, false);
-          generated := R.DeclareVar(R.MUT, escapeIdent(name), Some(typeString), None);
-          readIdents := {};
+          var newStmt := DeclareVar(name, typ, Some(InitializationValue(typ)));
+          assume {:axiom} newStmt < stmt;
+          generated, readIdents, newEnv := GenStmt(newStmt, selfIdent, env, isLast, earlyReturn);
         }
         case Assign(lhs, expression) => {
           var lhsGen, needsIIFE, recIdents := GenAssignLhs(lhs, "__rhs", selfIdent, env);
           var exprGen, _, exprIdents := GenExpr(expression, selfIdent, env, OwnershipOwned);
 
           if needsIIFE {
+            newEnv := env;
             generated := R.Block(
               R.StmtExpr(
                 R.DeclareVar(R.CONST, "__rhs", None, Some(exprGen)),
@@ -2050,46 +2129,57 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
               )
             );
           } else {
+            if lhs.Ident? {
+              var rustId := escapeIdent(lhs.ident.id);
+              var tpe := env.GetType(rustId);
+              if tpe.Some? && tpe.value.ExtractMaybePlacebo().Some? {
+                exprGen := R.MaybePlacebo(exprGen);
+              }
+            }
             generated := R.AssignVar(lhsGen, exprGen);
+            newEnv := env;
           }
 
           readIdents := recIdents + exprIdents;
         }
-        case If(cond, thn, els) => {
+        case If(cond, thnDafny, elsDafny) => {
           var cond, _, recIdents := GenExpr(cond, selfIdent, env, OwnershipOwned);
           var condString := cond.ToString(IND);
 
           readIdents := recIdents;
-          var thn, thnIdents := GenStmts(thn, selfIdent, env, isLast, earlyReturn);
+          var thn, thnIdents, thnEnv := GenStmts(thnDafny, selfIdent, env, isLast, earlyReturn);
           readIdents := readIdents + thnIdents;
-          var els, elsIdents := GenStmts(els, selfIdent, env, isLast, earlyReturn);
+          var els, elsIdents, elsEnv := GenStmts(elsDafny, selfIdent, env, isLast, earlyReturn);
           readIdents := readIdents + elsIdents;
+          newEnv := env;
           generated := R.IfExpr(cond, thn, els);
         }
         case Labeled(lbl, body) => {
-          var body, bodyIdents := GenStmts(body, selfIdent, env, isLast, earlyReturn);
+          var body, bodyIdents, env2 := GenStmts(body, selfIdent, env, isLast, earlyReturn);
           readIdents := bodyIdents;
           generated := R.Labelled("label_" + lbl, R.Loop(None, R.StmtExpr(body, R.Break(None))));
+          newEnv := env;
         }
         case While(cond, body) => {
           var cond, _, recIdents := GenExpr(cond, selfIdent, env, OwnershipOwned);
-
           readIdents := recIdents;
-          var body, bodyIdents := GenStmts(body, selfIdent, env, false, earlyReturn);
-          readIdents := readIdents + bodyIdents;
 
-          generated := R.Loop(Some(cond), body);
+          var bodyExpr, bodyIdents, bodyEnv := GenStmts(body, selfIdent, env, false, earlyReturn);
+
+          newEnv := env;
+          readIdents := readIdents + bodyIdents;
+          generated := R.Loop(Some(cond), bodyExpr);
         }
         case Foreach(boundName, boundType, over, body) => {
           var over, _, recIdents := GenExpr(over, selfIdent, env, OwnershipOwned);
 
-          var boundTypeStr := GenType(boundType, false, false);
+          var boundTpe := GenType(boundType, false, false);
 
           readIdents := recIdents;
-          var body, bodyIdents := GenStmts(body, selfIdent, env.Add(boundName, OwnershipBorrowed), false, earlyReturn);
+          var bodyExpr, bodyIdents, bodyEnv := GenStmts(body, selfIdent, env.AddAssigned(boundName, R.Borrowed(boundTpe)), false, earlyReturn);
           readIdents := readIdents + bodyIdents - {boundName};
-
-          generated := R.For(escapeIdent(boundName), over, body);
+          newEnv := env;
+          generated := R.For(escapeIdent(boundName), over, bodyExpr);
         }
         case Break(toLabel) => {
           match toLabel {
@@ -2101,35 +2191,40 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
             }
           }
           readIdents := {};
+          newEnv := env;
         }
         case TailRecursive(body) => {
           // clone the parameters to make them mutable
           generated := R.RawExpr("");
 
           if selfIdent != None {
-            generated := generated.Then(R.DeclareVar(R.MUT, "_this", None, Some(R.RawExpr("self.clone()"))));
+            generated := generated.Then(R.DeclareVar(R.MUT, "_this", None, Some(R.self.Sel("clone").Apply([]))));
           }
 
-          var paramI := 0;
-          while paramI < |env.names| {
+          for paramI := 0 to |env.names| {
             var param := env.names[paramI];
-            generated := generated.Then(R.DeclareVar(R.MUT, escapeIdent(param), None, Some(R.Clone(R.Identifier(escapeIdent(param))))));
-            paramI := paramI + 1;
+            assume {:axiom} Expression.Ident(param) < stmt;
+            var paramInit, _, _ := GenExpr(Expression.Ident(param), selfIdent, env, OwnershipOwned);
+            generated := generated.Then(R.DeclareVar(R.MUT, escapeIdent(param), None, Some(paramInit)));
           }
-
-          var body, bodyIdents := GenStmts(body, if selfIdent != None then Some("_this") else None, Environment.Empty(), false, earlyReturn);
+          var bodyExpr, bodyIdents, bodyEnv := GenStmts(body, if selfIdent != None then Some("_this") else None, env, false, earlyReturn);
+          newEnv := env;
           readIdents := bodyIdents;
-          generated := generated.Then(R.Labelled("TAIL_CALL_START",
-                                                 R.Loop(None, body)));
+          generated := generated.Then(
+                         R.Labelled("TAIL_CALL_START",
+                           R.Loop(None, bodyExpr)));
         }
         case JumpTailCallStart() => {
           generated := R.Continue(Some("TAIL_CALL_START"));
           readIdents := {};
+          newEnv := env;
         }
         case Call(on, name, typeArgs, args, maybeOutVars) => {
           readIdents := {};
 
-          var typeArgString := "";
+          var onExpr, _, enclosingIdents := GenExpr(on, selfIdent, env, OwnershipAutoBorrowed);
+
+          var typeExprs := [];
           if (|typeArgs| >= 1) {
             var typeI := 0;
             var typeArgsR := [];
@@ -2139,73 +2234,69 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
 
               typeI := typeI + 1;
             }
-            typeArgString := R.TypeApp(R.TIdentifier("::"), typeArgsR).ToString(IND);
           }
 
-          var argString := "";
-          var i := 0;
-          while i < |args| {
-            if i > 0 {
-              argString := argString + ", ";
+          var argExprs := [];
+          for i := 0 to |args| {
+            var argOwnership := OwnershipBorrowed;
+            if name.Name? && i < |name.signature.parameters| {
+              var tpe := GenType(name.signature.parameters[i].typ, false, false);
+              if tpe.HasCopySemantics() {
+                argOwnership := OwnershipOwned;
+              }
             }
-
-            var argExpr, ownership, argIdents := GenExpr(args[i], selfIdent, env, OwnershipBorrowed);
-            var argExprString := argExpr.ToString(IND);
-
-            argString := argString + argExprString;
+            var argExpr, ownership, argIdents := GenExpr(args[i], selfIdent, env, argOwnership);
+            argExprs := argExprs + [argExpr];
             readIdents := readIdents + argIdents;
-
-            i := i + 1;
           }
-
-          var onExpr, _, enclosingIdents := GenExpr(on, selfIdent, env, OwnershipAutoBorrowed);
           readIdents := readIdents + enclosingIdents;
-          var enclosingString := onExpr.ToString(IND);
-          match on {
-            case Companion(_) => {
-              enclosingString := enclosingString + "::";
-            }
-            case _ => {
-              enclosingString := "(" + enclosingString + ").";
-            }
-          }
-
-          var receiver := "";
-          match maybeOutVars {
-            case Some(outVars) => {
-              if (|outVars| > 1) {
-                receiver := "(";
-              }
-              var outI := 0;
-              while outI < |outVars| {
-                if outI > 0 {
-                  receiver := receiver + ", ";
-                }
-
-                var outVar := outVars[outI];
-                receiver := receiver + outVar.id;
-
-                outI := outI + 1;
-              }
-              if (|outVars| > 1) {
-                receiver := receiver + ")";
-              }
-            }
-            case None => {}
-          }
-
+          
           var renderedName := match name {
-            case Name(name) => escapeIdent(name)
+            case Name(name, _) => escapeIdent(name)
             case MapBuilderAdd() | SetBuilderAdd() => "add"
             case MapBuilderBuild() | SetBuilderBuild() => "build"
           };
+          match on {
+            case Companion(_) => {
+              onExpr := onExpr.MSel(renderedName);
+            }
+            case _ => {
+              onExpr := onExpr.Sel(renderedName);
+            }
+          }
+          generated := onExpr;
+          if |typeExprs| > 0 {
+            generated := generated.ApplyType(typeExprs);
+          }
+          generated := generated.Apply(argExprs);
 
-          generated := R.RawExpr(
-            (if receiver != "" then (receiver + " = ") else "") +
-            enclosingString + renderedName + typeArgString + "(" + argString + ");");
+          if maybeOutVars.Some? && |maybeOutVars.value| == 1 {
+            var outVar := maybeOutVars.value[0].id;
+            if !env.HasCopySemantics(outVar) {
+              generated := R.MaybePlacebo(generated);
+            }
+            generated := R.AssignVar(outVar, generated);
+          } else if maybeOutVars.None? || |maybeOutVars.value| == 0 {
+            // Nothing to do here.
+          } else { // Multiple variables
+            var tmpVar := "_x";
+            var tmpId := R.Identifier(tmpVar);
+            generated := R.DeclareVar(R.CONST, tmpVar, None, Some(generated));
+            // We emit assignment to each receiver depending on its type, if it could be a placebo or not.
+            var outVars := maybeOutVars.value;
+            for outI := 0 to |outVars| {
+              var outVar := outVars[outI].id;
+              var rhs := tmpId.Sel(Strings.OfNat(outI));
+              if !env.HasCopySemantics(outVar) { 
+                rhs := R.MaybePlacebo(rhs);
+              }
+              generated := generated.Then(R.AssignVar(outVar, rhs));
+            }
+          }
+          newEnv := env;
         }
-        case Return(expr) => {
-          var expr, _, recIdents := GenExpr(expr, selfIdent, env, OwnershipOwned);
+        case Return(exprDafny) => {
+          var expr, _, recIdents := GenExpr(exprDafny, selfIdent, env, OwnershipOwned);
           readIdents := recIdents;
 
           if isLast {
@@ -2213,26 +2304,29 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
           } else {
             generated := R.Return(Some(expr));
           }
+          newEnv := env;
         }
         case EarlyReturn() => {
           generated := earlyReturn;
           readIdents := {};
+          newEnv := env;
         }
         case Halt() => {
-          generated := R.RawExpr("panic!(\"Halt\");");
+          generated := R.Identifier("panic!").Apply1(R.LiteralString("Halt", false));
           readIdents := {};
+          newEnv := env;
         }
         case Print(e) => {
           var printedExpr, recOwnership, recIdents := GenExpr(e, selfIdent, env, OwnershipBorrowed);
-          var printedExprString := printedExpr.ToString(IND);
-          generated := R.RawExpr("print!(\"{}\", ::dafny_runtime::DafnyPrintWrapper(" + printedExprString + "));");
+          generated := R.Identifier("print!").Apply([R.LiteralString("{}", false), 
+            R.dafny_runtime.MSel("DafnyPrintWrapper").Apply1(printedExpr)]);
           readIdents := recIdents;
+          newEnv := env;
         }
       }
     }
 
-    static const OpTable: map<BinOp, string>
-      :=
+    static const OpTable: map<BinOp, string> :=
       map[
         Mod() := "%",
         And() := "&&",
@@ -2715,9 +2809,11 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
             readIdents := recIdents;
           }
           case _ => {
+            var fromTpeGen := GenType(fromTpe, true, false);
+            var toTpeGen := GenType(toTpe, true, false);
             var recursiveGen, recOwned, recIdents := GenExpr(expr, selfIdent, env, expectedOwnership);
-            r := R.RawExpr("(" + recursiveGen.ToString(IND) + "/* <i>Coercion</i> not yet implemented */)");
-            r, resultingOwnership := FromOwned(r, expectedOwnership);
+            r := R.RawExpr("(" + recursiveGen.ToString(IND) + "/* <i>Coercion from " + fromTpeGen.ToString(IND) + " to " + toTpeGen.ToString(IND) + "</i> not yet implemented */)");
+            r, resultingOwnership := FromOwnership(r, recOwned, expectedOwnership);
             readIdents := recIdents;
           }
         }
@@ -2737,8 +2833,17 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
           r, resultingOwnership, readIdents :=
             GenExprLiteral(e, selfIdent, env, expectedOwnership);
         case Ident(name) => {
-          r := R.Identifier(escapeIdent(name));
+          var rName := escapeIdent(name);
+          r := R.Identifier(rName);
+          var tpe := env.GetType(rName);
+          var placeboOpt := if tpe.Some? then tpe.value.ExtractMaybePlacebo() else None;
           var currentlyBorrowed := env.IsBorrowed(name); // Otherwise names are owned 
+          var noNeedOfClone := env.HasCopySemantics(name);
+          if placeboOpt.Some? {
+            r := r.Sel("read").Apply([]);
+            currentlyBorrowed := false;
+            noNeedOfClone := true; // No need to clone it, it's already owned
+          }
           if expectedOwnership == OwnershipAutoBorrowed {
             resultingOwnership := OwnershipOwned;
             // No need to do anything
@@ -2746,7 +2851,9 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
             r := R.BorrowMut(r); // Needs to be explicit for out-parameters on methods
             resultingOwnership := OwnershipBorrowedMut;
           } else if expectedOwnership == OwnershipOwned {
-            r := R.Clone(r); // We don't transfer the ownership of an identifier
+            if !noNeedOfClone {
+              r := R.Clone(r); // We don't transfer the ownership of an identifier
+            }
             resultingOwnership := OwnershipOwned;
           } else if currentlyBorrowed {
             assert expectedOwnership == OwnershipBorrowed;
@@ -3241,32 +3348,34 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
         case Call(on, name, typeArgs, args) => {
           readIdents := {};
 
+          var onExpr, _, recIdents := GenExpr(on, selfIdent, env, OwnershipAutoBorrowed);
+
           var typeExprs := [];
           if (|typeArgs| >= 1) {
-            var typeI := 0;
-            while typeI < |typeArgs| {
-
+            for typeI := 0 to |typeArgs| {
               var typeExpr := GenType(typeArgs[typeI], false, false);
               typeExprs := typeExprs + [typeExpr];
-
-              typeI := typeI + 1;
             }
           }
 
           var argExprs := [];
-          var i := 0;
-          while i < |args| {
-            var argExpr, argOwnership, argIdents := GenExpr(args[i], selfIdent, env, OwnershipBorrowed);
+          for i := 0 to |args| {
+            var argOwnership := OwnershipBorrowed;
+            if name.Name? && i < |name.signature.parameters| {
+              var tpe := GenType(name.signature.parameters[i].typ, false, false);
+              if tpe.HasCopySemantics() {
+                argOwnership := OwnershipOwned;
+              }
+            }
+
+            var argExpr, _, argIdents := GenExpr(args[i], selfIdent, env, argOwnership);
             argExprs := argExprs + [argExpr];
             readIdents := readIdents + argIdents;
-
-            i := i + 1;
           }
 
-          var onExpr, _, recIdents := GenExpr(on, selfIdent, env, OwnershipAutoBorrowed);
           readIdents := readIdents + recIdents;
           var renderedName := match name {
-            case Name(ident) => escapeIdent(ident)
+            case Name(ident, _) => escapeIdent(ident)
             case MapBuilderAdd | SetBuilderAdd => "add"
             case MapBuilderBuild | SetBuilderBuild => "build"
           };
@@ -3286,19 +3395,18 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
           r, resultingOwnership := FromOwned(r, expectedOwnership);
           return;
         }
-        case Lambda(params, retType, body) => {
+        case Lambda(paramsDafny, retType, body) => {
+          var params := GenParams(paramsDafny);
           var paramNames := [];
-          var paramOwnerships := map[];
-          var i := 0;
-          while i < |params| {
+          var paramTypesMap := map[];
+          for i := 0 to |params| {
             var name := params[i].name;
             paramNames := paramNames + [name];
-            paramOwnerships := paramOwnerships[name := OwnershipBorrowed];
-            i := i + 1;
+            paramTypesMap := paramTypesMap[name := params[i].tpe];
           }
-          var env := Environment(paramNames, paramOwnerships);
+          var env := Environment(paramNames, paramTypesMap);
 
-          var recursiveGen, recIdents := GenStmts(body, if selfIdent != None then Some("_this") else None, env, true, R.RawExpr(""));
+          var recursiveGen, recIdents, _ := GenStmts(body, if selfIdent != None then Some("_this") else None, env, true, R.RawExpr(""));
           readIdents := {};
           var allReadCloned := "";
           while recIdents != {} decreases recIdents {
@@ -3318,18 +3426,13 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
 
           var paramsString := "";
           var paramTypes := "";
-          i := 0;
-          while i < |params| {
+          for i := 0 to |params| {
             if i > 0 {
               paramsString := paramsString + ", ";
               paramTypes := paramTypes + ", ";
             }
-
-            var typStr := GenType(params[i].typ, false, true);
-
-            paramsString := paramsString + escapeIdent(params[i].name) + ": " + R.Borrowed(typStr).ToString(IND);
-            paramTypes := paramTypes + R.Borrowed(typStr).ToString(IND);
-            i := i + 1;
+            paramsString := paramsString + escapeIdent(params[i].name) + ": " + R.Borrowed(params[i].tpe).ToString(IND);
+            paramTypes := paramTypes + R.Borrowed(params[i].tpe).ToString(IND);
           }
 
           var retTypeGen := GenType(retType, false, true);
@@ -3340,23 +3443,23 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
         }
         case BetaRedex(values, retType, expr) => {
           var paramNames := [];
-          var paramOwnerships := map[];
+          var paramFormals := GenParams(Std.Collections.Seq.Map(
+            (value: (Formal, Expression)) => value.0, values));
+          var paramTypes := map[];
           var paramNamesSet := {};
-          var i := 0;
-          while i < |values| {
+          for i := 0 to |values| {
             var name := values[i].0.name;
-            paramNames := paramNames + [name];
-            paramOwnerships := paramOwnerships[name := OwnershipBorrowed];
+            var rName := escapeIdent(name);
+            paramNames := paramNames + [rName];
+            paramTypes := paramTypes[rName := paramFormals[i].tpe];
             paramNamesSet := paramNamesSet + {name};
-            i := i + 1;
           }
 
           readIdents := {};
           var s := "{\n";
 
           var paramsString := "";
-          i := 0;
-          while i < |values| {
+          for i := 0 to |values| {
             if i > 0 {
               paramsString := paramsString + ", ";
             }
@@ -3368,10 +3471,9 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
             readIdents := readIdents + recIdents;
 
             s := s + valueGen.ToString(IND) + ";\n";
-            i := i + 1;
           }
 
-          var newEnv := Environment(paramNames, paramOwnerships);
+          var newEnv := Environment(paramNames, paramTypes);
 
           var recGen, recOwned, recIdents := GenExpr(expr, selfIdent, newEnv, expectedOwnership);
           readIdents := recIdents - paramNamesSet;

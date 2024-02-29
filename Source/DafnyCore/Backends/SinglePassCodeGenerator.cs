@@ -403,6 +403,9 @@ namespace Microsoft.Dafny.Compilers {
     protected virtual void DeclareLocalVar(string name, Type/*?*/ type, IToken/*?*/ tok, Expression rhs, bool inLetExprBody, ConcreteSyntaxTree wr) {
       var wStmts = wr.Fork();
       var w = DeclareLocalVar(name, type ?? rhs.Type, tok, wr);
+      if (type != null && !type.Equals(rhs.Type)) {
+        w = EmitCoercionIfNecessary(rhs.Type, type, rhs.tok, w);
+      }
       EmitExpr(rhs, inLetExprBody, w, wStmts);
     }
 
