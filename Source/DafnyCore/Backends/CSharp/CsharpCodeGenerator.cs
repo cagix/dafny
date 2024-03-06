@@ -2634,7 +2634,7 @@ namespace Microsoft.Dafny.Compilers {
       } else if (member is Function fn) {
         var wr = new ConcreteSyntaxTree();
         EmitNameAndActualTypeArgs(IdName(member), TypeArgumentInstantiation.ToActuals(ForTypeParameters(typeArgs, member, false)),
-        member.tok, null, wr);
+        member.tok, null, false, wr);
         if (typeArgs.Count == 0 && additionalCustomParameter == null) {
           var nameAndTypeArgs = wr.ToString();
           return SuffixLvalue(obj, $".{nameAndTypeArgs}");

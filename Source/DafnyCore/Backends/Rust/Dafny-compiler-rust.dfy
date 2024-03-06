@@ -2316,7 +2316,7 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
           readIdents := readIdents + enclosingIdents;
           
           var renderedName := match name {
-            case Name(name, _) => escapeIdent(name)
+            case Name(name, _, _) => escapeIdent(name)
             case MapBuilderAdd() | SetBuilderAdd() => "add"
             case MapBuilderBuild() | SetBuilderBuild() => "build"
           };
@@ -2325,6 +2325,14 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
               onExpr := onExpr.MSel(renderedName);
             }
             case _ => {
+              match name {
+                case Name(_, Some(tpe), _) =>
+                  var typ := GenType(tpe, false, false);
+                  if typ.Pointer? || typ.PointerMut? {
+                    onExpr := R.dafny_runtime.MSel("modify!").Apply1(onExpr);
+                  }
+                case _ =>
+              }
               onExpr := onExpr.Sel(renderedName);
             }
           }
@@ -3316,7 +3324,7 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
         case Select(Companion(c), field, isConstant, isDatatype) => {
           var onExpr, onOwned, recIdents := GenExpr(Companion(c), selfIdent, env, OwnershipBorrowed);
 
-          r := R.RawExpr(onExpr.ToString(IND) + "::" + escapeIdent(field) + "()");
+          r := onExpr.MSel(escapeIdent(field)).Apply([]);
 
           r, resultingOwnership := FromOwned(r, expectedOwnership);
           readIdents := recIdents;
@@ -3434,15 +3442,24 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
 
           readIdents := readIdents + recIdents;
           var renderedName := match name {
-            case Name(ident, _) => escapeIdent(ident)
+            case Name(ident, _, _) => escapeIdent(ident)
             case MapBuilderAdd | SetBuilderAdd => "add"
             case MapBuilderBuild | SetBuilderBuild => "build"
           };
+          // Pointers in the role of "self" must be converted to borrowed versions.
           match on {
             case Companion(_) => {
               onExpr := onExpr.MSel(renderedName);
             }
             case _ => {
+              match name {
+                case Name(_, Some(tpe), _) =>
+                  var typ := GenType(tpe, false, false);
+                  if typ.Pointer? || typ.PointerMut? {
+                    onExpr := R.dafny_runtime.MSel("read!").Apply1(onExpr);
+                  }
+                case _ =>
+              }
               onExpr := onExpr.Sel(renderedName);
             }
           }

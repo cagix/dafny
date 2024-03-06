@@ -740,8 +740,12 @@ namespace Microsoft.Dafny.Compilers {
       }
     }
 
-    protected override void EmitNameAndActualTypeArgs(string protectedName, List<Type> typeArgs, IToken tok, Expression replacementReceiver, ConcreteSyntaxTree wr) {
+    protected override void EmitNameAndActualTypeArgs(string protectedName, List<Type> typeArgs, IToken tok,
+     Expression replacementReceiver, bool receiverAsArgument, ConcreteSyntaxTree wr) {
       Sequence<_IFormal> receiverArgs = null;
+      Option<DAST.Type> receiverType = replacementReceiver != null && !receiverAsArgument
+        ? (Option<DAST.Type>) Option<DAST.Type>.create_Some(GenType(replacementReceiver.Type))
+        : (Option<DAST.Type>) Option<DAST.Type>.create_None();
       if (replacementReceiver != null) {
         var name = replacementReceiver is IdentifierExpr {Var: {CompileName: var compileName}}
           ? compileName
@@ -757,13 +761,13 @@ namespace Microsoft.Dafny.Compilers {
         if (receiverArgs != null) {
           signature = Sequence<_IFormal>.FromArray(receiverArgs.Concat(signature).ToArray());
         }
-        callExpr.SetName((DAST.CallName)DAST.CallName.create_Name(Sequence<Rune>.UnicodeFromString(protectedName), signature));
+        callExpr.SetName((DAST.CallName)DAST.CallName.create_Name(Sequence<Rune>.UnicodeFromString(protectedName), receiverType, signature));
       } else if (GetExprBuilder(wr, out var st2) && st2.Builder is CallStmtBuilder callStmt) {
         var signature = callStmt.Signature;
         if (receiverArgs != null) {
           signature = Sequence<_IFormal>.FromArray(receiverArgs.Concat(signature).ToArray());
         }
-        callStmt.SetName((DAST.CallName)DAST.CallName.create_Name(Sequence<Rune>.UnicodeFromString(protectedName), signature));
+        callStmt.SetName((DAST.CallName)DAST.CallName.create_Name(Sequence<Rune>.UnicodeFromString(protectedName), receiverType, signature));
       } else {
         throwGeneralUnsupported("Builder issue: wr is as " + wr.GetType() +
                                 (GetExprBuilder(wr, out var st3) ?
@@ -772,7 +776,7 @@ namespace Microsoft.Dafny.Compilers {
         return;
       }
 
-      base.EmitNameAndActualTypeArgs(protectedName, typeArgs, tok, replacementReceiver, wr);
+      base.EmitNameAndActualTypeArgs(protectedName, typeArgs, tok, replacementReceiver, receiverAsArgument, wr);
     }
 
     protected override void TypeArgDescriptorUse(bool isStatic, bool lookasideBody, TopLevelDeclWithMembers cl, out bool needsTypeParameter, out bool needsTypeDescriptor) {

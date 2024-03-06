@@ -1440,7 +1440,7 @@ namespace Microsoft.Dafny.Compilers {
       } else if (member is Function fn) {
         var wr = new ConcreteSyntaxTree();
         EmitNameAndActualTypeArgs(IdName(member), TypeArgumentInstantiation.ToActuals(ForTypeParameters(typeArgs, member, false)),
-          member.tok, null, wr);
+          member.tok, null, false, wr);
         var needsEtaConversion = typeArgs.Any()
                || additionalCustomParameter != null
                || (UnicodeCharEnabled &&
@@ -2459,7 +2459,7 @@ namespace Microsoft.Dafny.Compilers {
     }
 
     protected override void EmitNameAndActualTypeArgs(string protectedName, List<Type> typeArgs, IToken tok,
-      Expression customReceiver, ConcreteSyntaxTree wr) {
+      Expression customReceiver, bool receiverAsArgument, ConcreteSyntaxTree wr) {
       EmitActualTypeArgs(typeArgs, tok, wr);
       wr.Write(protectedName);
     }

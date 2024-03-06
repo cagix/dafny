@@ -93,7 +93,7 @@ module {:extern "DAST"} DAST {
   datatype CallSignature = CallSignature(parameters: seq<Formal>)
 
   datatype CallName =
-    Name(name: string, signature: CallSignature) |
+    Name(name: string, onType: Option<Type>, signature: CallSignature) |
     MapBuilderAdd | MapBuilderBuild | SetBuilderAdd | SetBuilderBuild
 
   datatype Statement =
