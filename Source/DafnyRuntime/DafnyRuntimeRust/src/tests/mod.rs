@@ -190,18 +190,18 @@ mod tests {
     #[test]
     fn test_dafny_array() {
         let a = array![1, 2, 3];
-        assert_eq!(a.length_usize(), 3);
-        assert_eq!(a.length(), int!(3));
-        assert_eq!(a.get_usize(0), 1);
-        assert_eq!(a.get_usize(1), 2);
-        assert_eq!(a.get_usize(2), 3);
-        a.update_usize(0, 4);
-        a.update_usize(1, 5);
-        a.update_usize(2, 6);
-        assert_eq!(a.get_usize(0), 4);
-        assert_eq!(a.get_usize(1), 5);
-        assert_eq!(a.get_usize(2), 6);
-        deallocate(a.0);
+        assert_eq!(crate::array::length_usize(a), 3);
+        assert_eq!(crate::array::length(a), int!(3));
+        assert_eq!(array::get_usize(a, 0), 1);
+        assert_eq!(array::get_usize(a, 1), 2);
+        assert_eq!(array::get_usize(a, 2), 3);
+        array::update_usize(a, 0, 4);
+        array::update_usize(a, 1, 5);
+        array::update_usize(a, 2, 6);
+        assert_eq!(array::get_usize(a, 0), 4);
+        assert_eq!(array::get_usize(a, 1), 5);
+        assert_eq!(array::get_usize(a, 2), 6);
+        deallocate(a);
     }
 
     #[test]
@@ -211,24 +211,24 @@ mod tests {
         v.push(1);
         v.push(2);
         v.push(3);
-        let a = Array::from_vec(v);
-        assert_eq!(a.length_usize(), 3);
-        assert_eq!(a.get_usize(0), 1);
-        let v2 = Array::initialize_usize(3, Rc::new(|i| i + 1));
-        assert_eq!(v2.length_usize(), 3);
-        assert_eq!(v2.get_usize(0), 1);
-        assert_eq!(v2.get_usize(1), 2);
-        assert_eq!(v2.get_usize(2), 3);
-        v2.update_usize(1, 10);
-        assert_eq!(v2.get_usize(1), 10);
+        let a = array::from_vec(v);
+        assert_eq!(array::length_usize(a), 3);
+        assert_eq!(array::get_usize(a, 0), 1);
+        let v2 = array::initialize_usize(3, Rc::new(|i| i + 1));
+        assert_eq!(array::length_usize(v2), 3);
+        assert_eq!(array::get_usize(v2, 0), 1);
+        assert_eq!(array::get_usize(v2, 1), 2);
+        assert_eq!(array::get_usize(v2, 2), 3);
+        array::update_usize(v2, 1, 10);
+        assert_eq!(array::get_usize(v2, 1), 10);
 
-        let v3 = Array::initialize(&int!(3), Rc::new(|i| i.clone() + int!(1)));
-        assert_eq!(v3.length_usize(), 3);
-        assert_eq!(v3.get_usize(0), int!(1));
-        assert_eq!(v3.get_usize(1), int!(2));
-        assert_eq!(v3.get_usize(2), int!(3));
-        v3.update(&int!(1), int!(10));
-        assert_eq!(v3.get_usize(1), int!(10));
+        let v3 = array::initialize(&int!(3), Rc::new(|i| i.clone() + int!(1)));
+        assert_eq!(array::length_usize(v3), 3);
+        assert_eq!(array::get_usize(v3, 0), int!(1));
+        assert_eq!(array::get_usize(v3, 1), int!(2));
+        assert_eq!(array::get_usize(v3, 2), int!(3));
+        array::update(v3, &int!(1), int!(10));
+        assert_eq!(array::get_usize(v3, 1), int!(10));
     }
 
     struct ClassWrapper<T> {
@@ -397,3 +397,76 @@ mod tests {
     }
 }
 // Struct containing two reference-counted fields
+
+
+mod node_graph {
+    use std::rc::Rc;
+    use std::cell::RefCell;
+    type NodeRef<I> = Rc<RefCell<_Node<I>>>;
+
+    #[derive(Clone)]
+    // The private representation of a node.
+    struct _Node<I> {
+        inner_value: I,
+        adjacent: Vec<NodeRef<I>>,
+    }
+    #[derive(Clone)]
+    // The public representation of a node, with some syntactic sugar.
+    struct Node<I>(NodeRef<I>);
+
+    impl<I> Node<I> {
+        // Creates a new node with no edges.
+        fn new(inner: I) -> Node<I> {
+            let node = _Node { inner_value: inner, adjacent: vec![] };
+            Node(Rc::new(RefCell::new(node)))
+        }
+
+        // Adds a directed edge from this node to other node.
+        fn add_adjacent(&self, other: &Node<I>) {
+            (self.0.borrow_mut()).adjacent.push(other.0.clone());
+        }
+    }
+    #[derive(Clone)]
+    struct Graph<I> {
+        nodes: Vec<Node<I>>,
+    }
+
+    impl<I> Graph<I> {
+        fn with_nodes(nodes: Vec<Node<I>>) -> Self {
+            Graph { nodes: nodes }
+        }
+    }
+
+    impl <I>  Drop for Graph<I> {
+        fn drop(&mut self) {
+            // Drop all the nodes in the graph by removing all their edges
+            for node in self.nodes.iter() {
+                let mut node = node.0.borrow_mut();
+                node.adjacent.clear();
+            }
+        }
+    }
+    impl <I> Drop for Node<I> {
+        fn drop(&mut self) {
+            // Drop all the edges from this node
+            let mut node: std::cell::RefMut<'_, _Node<I>> = self.0.borrow_mut();
+            //node.adjacent.clear();
+        }
+    }
+
+    #[test]
+    fn test() {
+        let a = Node::new(1);
+        let b = Node::new(2);
+        assert_eq!(Rc::strong_count(&a.0), 1);
+        assert_eq!(Rc::strong_count(&b.0), 1);
+        a.add_adjacent(&b);
+        assert_eq!(Rc::strong_count(&a.0), 1);
+        assert_eq!(Rc::strong_count(&b.0), 2);
+        b.add_adjacent(&a);
+        assert_eq!(Rc::strong_count(&a.0), 2);
+        assert_eq!(Rc::strong_count(&b.0), 2);
+        drop(b);
+        assert_eq!(Rc::strong_count(&a.0), 1);
+    }
+}

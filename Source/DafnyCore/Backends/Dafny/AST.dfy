@@ -15,6 +15,16 @@ module {:extern "DAST.Format"} DAST.Format
     | ImpliesFormat
     | Equivalence
     | ReverseOperands
+
+  function SeqToHeight<T>(s: seq<T>, f: T --> nat): (r: nat)
+    requires forall t <- s :: f.requires(t)
+    ensures forall t <- s :: f(t) <= r
+  {
+    if |s| == 0 then 0 else
+    var i := f(s[0]);
+    var j := SeqToHeight(s[1..], f);
+    if i < j then j else i
+  }
 }
 
 module {:extern "DAST"} DAST {
@@ -55,6 +65,7 @@ module {:extern "DAST"} DAST {
   datatype DatatypeType = DatatypeType(path: seq<Ident>, attributes: seq<Attribute>)
 
   datatype ResolvedType =
+    | AllocatedDatatype(datatypeType: DatatypeType)
     | Datatype(datatypeType: DatatypeType)
     | Trait(path: seq<Ident>, attributes: seq<Attribute>)
     | Newtype(baseType: Type, range: NewtypeRange, erase: bool, attributes: seq<Attribute>)
@@ -100,6 +111,8 @@ module {:extern "DAST"} DAST {
     JumpTailCallStart() |
     Halt() |
     Print(Expression)
+  {
+  }
 
   datatype AssignLhs =
     Ident(ident: Ident) |

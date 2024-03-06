@@ -246,7 +246,7 @@ namespace Microsoft.Dafny.Compilers {
         foreach (var tp in dt.TypeArgs) {
           var compileName = IdProtect(tp.GetCompileName(Options));
           if (!isTpSupported(tp, out var why) && !(dt is TupleTypeDecl)) {
-            compileName += $"({why})";
+            compileName += $"/*{why}*/";
           }
 
           typeParams.Add((DAST.Type)DAST.Type.create_TypeArg(Sequence<Rune>.UnicodeFromString(compileName)));
@@ -740,11 +740,30 @@ namespace Microsoft.Dafny.Compilers {
       }
     }
 
-    protected override void EmitNameAndActualTypeArgs(string protectedName, List<Type> typeArgs, IToken tok, ConcreteSyntaxTree wr) {
+    protected override void EmitNameAndActualTypeArgs(string protectedName, List<Type> typeArgs, IToken tok, Expression replacementReceiver, ConcreteSyntaxTree wr) {
+      Sequence<_IFormal> receiverArgs = null;
+      if (replacementReceiver != null) {
+        var name = replacementReceiver is IdentifierExpr {Var: {CompileName: var compileName}}
+          ? compileName
+          : "receiver";
+        receiverArgs = (Sequence<_IFormal>)Sequence<_IFormal>.FromArray(new _IFormal[] {
+          DAST.Formal.create_Formal(Sequence<Rune>.UnicodeFromString(name),
+            GenType(replacementReceiver.Type))
+        });
+      }
+      
       if (GetExprBuilder(wr, out var st) && st.Builder is CallExprBuilder callExpr) {
-        callExpr.SetName((DAST.CallName)DAST.CallName.create_Name(Sequence<Rune>.UnicodeFromString(protectedName), callExpr.Signature));
+        var signature = callExpr.Signature;
+        if (receiverArgs != null) {
+          signature = Sequence<_IFormal>.FromArray(receiverArgs.Concat(signature).ToArray());
+        }
+        callExpr.SetName((DAST.CallName)DAST.CallName.create_Name(Sequence<Rune>.UnicodeFromString(protectedName), signature));
       } else if (GetExprBuilder(wr, out var st2) && st2.Builder is CallStmtBuilder callStmt) {
-        callStmt.SetName((DAST.CallName)DAST.CallName.create_Name(Sequence<Rune>.UnicodeFromString(protectedName), callStmt.Signature));
+        var signature = callStmt.Signature;
+        if (receiverArgs != null) {
+          signature = Sequence<_IFormal>.FromArray(receiverArgs.Concat(signature).ToArray());
+        }
+        callStmt.SetName((DAST.CallName)DAST.CallName.create_Name(Sequence<Rune>.UnicodeFromString(protectedName), signature));
       } else {
         throwGeneralUnsupported("Builder issue: wr is as " + wr.GetType() +
                                 (GetExprBuilder(wr, out var st3) ?
@@ -753,7 +772,7 @@ namespace Microsoft.Dafny.Compilers {
         return;
       }
 
-      base.EmitNameAndActualTypeArgs(protectedName, typeArgs, tok, wr);
+      base.EmitNameAndActualTypeArgs(protectedName, typeArgs, tok, replacementReceiver, wr);
     }
 
     protected override void TypeArgDescriptorUse(bool isStatic, bool lookasideBody, TopLevelDeclWithMembers cl, out bool needsTypeParameter, out bool needsTypeDescriptor) {
@@ -841,6 +860,10 @@ namespace Microsoft.Dafny.Compilers {
       } else {
         throw new InvalidOperationException("Cannot call statement in this context: " + currentBuilder);
       }
+    }
+
+    public override bool NeedsCustomReceiver(MemberDecl member) {
+      return member is Constructor || base.NeedsCustomReceiver(member);
     }
 
     protected override void EmitCallToInheritedMethod(Method method, [CanBeNull] TopLevelDeclWithMembers heir, ConcreteSyntaxTree wr, ConcreteSyntaxTree wStmts, ConcreteSyntaxTree wStmtsAfterCall) {
@@ -1451,20 +1474,13 @@ namespace Microsoft.Dafny.Compilers {
         resolvedType = (DAST.ResolvedType)DAST.ResolvedType.create_Newtype(
           GenType(EraseNewtypeLayers(topLevel)), NewtypeRange.create_NoRange(), true, ParseAttributes(typeSynonym.Attributes));
       } else if (topLevel is TraitDecl) {
-        ThrowSpecificUnsupported(Token.NoToken, Feature.Traits);
-        resolvedType = (DAST.ResolvedType)DAST.ResolvedType.create_Newtype(
-          DAST.Type.create_Passthrough(Sequence<Rune>.UnicodeFromString("<b>Unsupported: <i>Traits</i></b>")),
-          NewtypeRange.create_NoRange(), true, ParseAttributes(topLevel.Attributes)
-        );
-        // traits need a bit more work
-
-        // resolvedType = (DAST.ResolvedType)DAST.ResolvedType.create_Trait(path);
+        resolvedType = (DAST.ResolvedType)DAST.ResolvedType.create_Trait(path, ParseAttributes(topLevel.Attributes));
       } else if (topLevel is DatatypeDecl) {
         resolvedType = (DAST.ResolvedType)DAST.ResolvedType.create_Datatype(
           (DatatypeType)DatatypeType.create_DatatypeType(path, ParseAttributes(topLevel.Attributes)));
       } else if (topLevel is ClassDecl) {
-        // TODO(Mikael): have a separate type when we properly support classes
-        resolvedType = (DAST.ResolvedType)DAST.ResolvedType.create_Datatype((DatatypeType)DatatypeType.create_DatatypeType(path, ParseAttributes(topLevel.Attributes)));
+        resolvedType = (DAST.ResolvedType)DAST.ResolvedType.create_AllocatedDatatype(
+          (DatatypeType)DatatypeType.create_DatatypeType(path, ParseAttributes(topLevel.Attributes)));
       } else {
         // SubsetTypeDecl are covered by TypeSynonymDecl
         throw new InvalidOperationException(topLevel.GetType().ToString());

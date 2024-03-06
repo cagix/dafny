@@ -4,13 +4,21 @@
 
 module {:compile false} {:extern "std"} RustStd {
   // Define the Rust option type
-  datatype {:extern "option::Option"} {:compile false} {:rust_rc false} Option<+T> =
+  datatype {:extern "option::Option"} {:compile false} {:rust_rc false} Option<T> =
+    Some({:extern "0"} {:extern_extract "unwrap"} value: T) | None {
+  }
+}
+
+module RustStdCompare {
+  // Define the Rust option type
+  datatype {:rust_rc false} Option<T> =
     Some({:extern "0"} {:extern_extract "unwrap"} value: T) | None {
   }
 }
 
 module DatatypeTests {
   import opened RustStd
+  import RustStdCompare
 
   newtype u8 = x: int | 0 <= x < 255
 
@@ -156,5 +164,11 @@ module DatatypeTests {
     print x, "\n";
     var no: Option<u8> := None;
     print no, "\n";
+
+    var homeMadeOption := RustStdCompare.Some(3);
+    if homeMadeOption.Some? {
+      print homeMadeOption.value, "\n";
+    }
+    homeMadeOption := RustStdCompare.None;
   }
 }

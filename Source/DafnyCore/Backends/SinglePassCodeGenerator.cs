@@ -445,7 +445,8 @@ namespace Microsoft.Dafny.Compilers {
 
     protected abstract void EmitActualTypeArgs(List<Type> typeArgs, IToken tok, ConcreteSyntaxTree wr);
 
-    protected virtual void EmitNameAndActualTypeArgs(string protectedName, List<Type> typeArgs, IToken tok, ConcreteSyntaxTree wr) {
+    protected virtual void EmitNameAndActualTypeArgs(string protectedName, List<Type> typeArgs, IToken tok,
+      [CanBeNull] Expression replacementReceiver, ConcreteSyntaxTree wr) {
       wr.Write(protectedName);
       EmitActualTypeArgs(typeArgs, tok, wr);
     }
@@ -2049,6 +2050,9 @@ namespace Microsoft.Dafny.Compilers {
 
     public virtual bool NeedsCustomReceiver(MemberDecl member) {
       Contract.Requires(member != null);
+      if (member.EnclosingClass is TraitDecl) {
+        return false;
+      }
       // One of the limitations in many target language encodings are restrictions to instance members. If an
       // instance member can't be directly expressed in the target language, we make it a static member with an
       // additional first argument specifying the `this`, giving it a `CustomReceiver`.
@@ -2363,7 +2367,8 @@ namespace Microsoft.Dafny.Compilers {
       var calleeReceiverType = UserDefinedType.FromTopLevelDecl(f.tok, f.EnclosingClass).Subst(thisContext.ParentFormalTypeParametersToActuals);
       wr.Write("{0}{1}", TypeName_Companion(calleeReceiverType, wr, f.tok, f), StaticClassAccessor);
       var typeArgs = CombineAllTypeArguments(f, thisContext);
-      EmitNameAndActualTypeArgs(IdName(f), TypeArgumentInstantiation.ToActuals(ForTypeParameters(typeArgs, f, true)), f.tok, wr);
+      EmitNameAndActualTypeArgs(IdName(f), TypeArgumentInstantiation.ToActuals(ForTypeParameters(typeArgs, f, true)),
+        f.tok, new ThisExpr(thisContext), wr);
       wr.Write("(");
       var sep = "";
       EmitTypeDescriptorsActuals(ForTypeDescriptors(typeArgs, f.EnclosingClass, f, true), f.tok, wr, ref sep);
@@ -2404,7 +2409,8 @@ namespace Microsoft.Dafny.Compilers {
       var calleeReceiverType = UserDefinedType.FromTopLevelDecl(f.tok, f.EnclosingClass).Subst(thisContext.ParentFormalTypeParametersToActuals);
       wr.Write("{0}{1}", TypeName_Companion(calleeReceiverType, wr, f.tok, f), StaticClassAccessor);
       var typeArgs = CombineAllTypeArguments(f, thisContext);
-      EmitNameAndActualTypeArgs(companionName, TypeArgumentInstantiation.ToActuals(ForTypeParameters(typeArgs, f, true)), f.tok, wr);
+      EmitNameAndActualTypeArgs(companionName, TypeArgumentInstantiation.ToActuals(ForTypeParameters(typeArgs, f, true)), 
+      f.tok, new ThisExpr(thisContext), wr);
       wr.Write("(");
       var sep = "";
       EmitTypeDescriptorsActuals(ForTypeDescriptors(typeArgs, f.EnclosingClass, f, true), f.tok, wr, ref sep);
@@ -2489,7 +2495,8 @@ namespace Microsoft.Dafny.Compilers {
       wr.Write(StaticClassAccessor);
 
       var typeArgs = CombineAllTypeArguments(method, thisContext);
-      EmitNameAndActualTypeArgs(companionName, TypeArgumentInstantiation.ToActuals(ForTypeParameters(typeArgs, method, true)), method.tok, wr);
+      EmitNameAndActualTypeArgs(companionName, TypeArgumentInstantiation.ToActuals(ForTypeParameters(typeArgs, method, true)),
+        method.tok, new ThisExpr(thisContext), wr);
       wr.Write("(");
       var sep = "";
       EmitTypeDescriptorsActuals(ForTypeDescriptors(typeArgs, method.EnclosingClass, method, true), method.tok, wr, ref sep);
@@ -2760,7 +2767,7 @@ namespace Microsoft.Dafny.Compilers {
           }
         }
         var typeArgs = CombineAllTypeArguments(m, ty.TypeArgs, m.TypeArgs.ConvertAll(tp => (Type)Type.Bool));
-        bool customReceiver = !(m.EnclosingClass is TraitDecl) && NeedsCustomReceiver(m);
+        bool customReceiver = NeedsCustomReceiver(m);
 
         if (receiver != null && !customReceiver) {
           w.Write("{0}.", IdName(receiver));
@@ -2768,11 +2775,12 @@ namespace Microsoft.Dafny.Compilers {
           var companion = TypeName_Companion(UserDefinedType.FromTopLevelDeclWithAllBooleanTypeParameters(m.EnclosingClass), w, m.tok, m);
           w.Write("{0}.", companion);
         }
-        EmitNameAndActualTypeArgs(IdName(m), TypeArgumentInstantiation.ToActuals(ForTypeParameters(typeArgs, m, false)), m.tok, w);
+        EmitNameAndActualTypeArgs(IdName(m), TypeArgumentInstantiation.ToActuals(ForTypeParameters(typeArgs, m, false)), m.tok,
+          receiver == null || !customReceiver ? null : new IdentifierExpr(receiver.tok, receiver), w);
         w.Write("(");
         var sep = "";
         if (receiver != null && customReceiver) {
-          w.Write("{0}", IdName(receiver));
+          EmitIdentifier(IdName(receiver), w);
           sep = ", ";
         }
         EmitTypeDescriptorsActuals(ForTypeDescriptors(typeArgs, m.EnclosingClass, m, false), m.tok, w, ref sep);
@@ -4838,8 +4846,7 @@ namespace Microsoft.Dafny.Compilers {
         }
         Contract.Assert(lvalues.Count == outTmps.Count);
 
-        bool customReceiver = !(s.Method.EnclosingClass is TraitDecl) && NeedsCustomReceiver(s.Method);
-        Contract.Assert(receiverReplacement == null || !customReceiver);  // What would be done in this case? It doesn't ever happen, right?
+        bool customReceiver = NeedsCustomReceiver(s.Method);
 
         var returnStyleOuts = UseReturnStyleOuts(s.Method, outTmps.Count);
         var returnStyleOutCollector = outTmps.Count > 1 && returnStyleOuts && !SupportsMultipleReturns ? ProtectedFreshId("_outcollector") : null;
@@ -4855,12 +4862,12 @@ namespace Microsoft.Dafny.Compilers {
           wr = EmitDowncastIfNecessary(instantiatedFromType, toType, s.Tok, wr);
         }
         var protectedName = receiverReplacement == null && customReceiver ? CompanionMemberIdName(s.Method) : IdName(s.Method);
-        if (receiverReplacement != null) {
-          EmitIdentifier(IdProtect(receiverReplacement), wr);
-          wr.Write(InstanceClassAccessor);
-        } else if (customReceiver) {
+        if (customReceiver) {
           EmitTypeName_Companion(s.Receiver.Type, wr, wr, s.Tok, s.Method);
           wr.Write(StaticClassAccessor);
+        } else if (receiverReplacement != null) {
+          EmitIdentifier(IdProtect(receiverReplacement), wr);
+          wr.Write(InstanceClassAccessor);
         } else if (!s.Method.IsStatic) {
           wr.Write("(");
           var wReceiver = wr;
@@ -4877,14 +4884,25 @@ namespace Microsoft.Dafny.Compilers {
           wr.Write(StaticClassAccessor);
         }
         var typeArgs = CombineAllTypeArguments(s.Method, s.MethodSelect.TypeApplication_AtEnclosingClass, s.MethodSelect.TypeApplication_JustMember);
-        EmitNameAndActualTypeArgs(protectedName, TypeArgumentInstantiation.ToActuals(ForTypeParameters(typeArgs, s.Method, false)), s.Tok, wr);
+        var firstReceiverArg = receiverReplacement != null && customReceiver ? s.Receiver : null;
+        EmitNameAndActualTypeArgs(protectedName, TypeArgumentInstantiation.ToActuals(ForTypeParameters(typeArgs, s.Method, false)), s.Tok,
+          firstReceiverArg, wr);
         wr.Write("(");
         var sep = "";
         EmitTypeDescriptorsActuals(ForTypeDescriptors(typeArgs, s.Method.EnclosingClass, s.Method, false), s.Tok, wr, ref sep);
         if (customReceiver) {
           wr.Write(sep);
-          var w = EmitCoercionIfNecessary(s.Receiver.Type, UserDefinedType.UpcastToMemberEnclosingType(s.Receiver.Type, s.Method), s.Tok, wr);
-          EmitExpr(s.Receiver, false, w, wStmts);
+          if (receiverReplacement != null) {
+            // Dafny-to-Dafny specific: Constructors are in the companion and their first argument is uninitialized,
+            // so they can't necessarily be called like an instance method. Rust forbids it for example.
+            // And we don't want to cast pointers to borrowed values, otherwise that would be undefined behavior.
+            EmitIdentifier(IdProtect(receiverReplacement), wr);
+          } else {
+            var w = EmitCoercionIfNecessary(s.Receiver.Type,
+              UserDefinedType.UpcastToMemberEnclosingType(s.Receiver.Type, s.Method), s.Tok, wr);
+            EmitExpr(s.Receiver, false, w, wStmts);
+          }
+
           sep = ", ";
         }
         for (int i = 0; i < s.Method.Ins.Count; i++) {
@@ -5190,7 +5208,7 @@ namespace Microsoft.Dafny.Compilers {
             var typeArgs = e.TypeApplication_AtEnclosingClass;
             Contract.Assert(typeArgs.Count == sf.EnclosingClass.TypeArgs.Count);
             wr.Write("{0}.", TypeName_Companion(e.Obj.Type, wr, e.tok, sf));
-            EmitNameAndActualTypeArgs(IdName(e.Member), typeArgs, e.tok, wr);
+            EmitNameAndActualTypeArgs(IdName(e.Member), typeArgs, e.tok, null, wr);
             var tas = TypeArgumentInstantiation.ListFromClass(sf.EnclosingClass, typeArgs);
             EmitTypeDescriptorsActuals(tas, e.tok, wr.ForkInParens());
           } else {
@@ -5208,7 +5226,7 @@ namespace Microsoft.Dafny.Compilers {
         } else {
           var typeArgs = CombineAllTypeArguments(e.Member, e.TypeApplication_AtEnclosingClass, e.TypeApplication_JustMember);
           var typeMap = e.TypeArgumentSubstitutionsWithParents();
-          var customReceiver = NeedsCustomReceiver(e.Member) && !(e.Member.EnclosingClass is TraitDecl);
+          var customReceiver = NeedsCustomReceiver(e.Member);
           if (!customReceiver && !e.Member.IsStatic) {
             Action<ConcreteSyntaxTree> obj;
             // The eta conversion here is to avoid capture of the receiver, because the call to EmitMemberSelect below may generate
@@ -6151,7 +6169,7 @@ namespace Microsoft.Dafny.Compilers {
         wr = EmitCoercionIfNecessary(f.Original.ResultType, toType, e.tok, wr);
       }
 
-      var customReceiver = !(f.EnclosingClass is TraitDecl) && NeedsCustomReceiver(f);
+      var customReceiver = NeedsCustomReceiver(f);
       string qual = "";
       string compileName = "";
       if (f.IsExtern(Options, out qual, out compileName) && qual != null) {
@@ -6170,7 +6188,9 @@ namespace Microsoft.Dafny.Compilers {
         compileName = IdName(f);
       }
       var typeArgs = CombineAllTypeArguments(f, e.TypeApplication_AtEnclosingClass, e.TypeApplication_JustFunction);
-      EmitNameAndActualTypeArgs(compileName, TypeArgumentInstantiation.ToActuals(ForTypeParameters(typeArgs, f, false)), f.tok, wr);
+      var nameReceiver = customReceiver ? e.Receiver : null;
+      EmitNameAndActualTypeArgs(compileName, TypeArgumentInstantiation.ToActuals(ForTypeParameters(typeArgs, f, false)),
+        f.tok, nameReceiver, wr);
       wr.Write("(");
       var sep = "";
       EmitTypeDescriptorsActuals(ForTypeDescriptors(typeArgs, f.EnclosingClass, f, false), e.tok, wr, ref sep);
