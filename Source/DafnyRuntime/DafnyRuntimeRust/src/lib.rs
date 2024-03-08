@@ -2272,12 +2272,14 @@ macro_rules! update_uninit {
 #[macro_export]
 macro_rules! update_field_uninit {
     ($t:expr, $field:ident, $field_assigned:expr, $value:expr) => {
-        let computed_value = $value;
-        if $field_assigned {
-            $crate::modify!($t).$field = computed_value;
-        } else {
-            $crate::update_field_nodrop!($t, $field, computed_value);
-            $field_assigned = true;
+        {
+            let computed_value = $value;
+            if $field_assigned {
+                $crate::modify!($t).$field = computed_value;
+            } else {
+                $crate::update_field_nodrop!($t, $field, computed_value);
+                $field_assigned = true;
+            }
         }
     }
 }

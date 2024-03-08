@@ -88,7 +88,18 @@ module {:extern "DAST"} DAST {
 
   datatype Formal = Formal(name: string, typ: Type)
 
-  datatype Method = Method(isStatic: bool, hasBody: bool, overridingPath: Option<seq<Ident>>, name: string, typeParams: seq<Type>, params: seq<Formal>, body: seq<Statement>, outTypes: seq<Type>, outVars: Option<seq<Ident>>)
+  datatype Method = Method(
+    isStatic: bool,
+    hasBody: bool,
+    outVarsAreUninitFieldsToAssign: bool, // For constructors
+    wasFunction: bool, // To choose between "&self" and "&mut self"
+    overridingPath: Option<seq<Ident>>,
+    name: string,
+    typeParams: seq<Type>,
+    params: seq<Formal>,
+    body: seq<Statement>,
+    outTypes: seq<Type>,
+    outVars: Option<seq<Ident>>)
 
   datatype CallSignature = CallSignature(parameters: seq<Formal>)
 

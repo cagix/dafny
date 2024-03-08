@@ -300,14 +300,14 @@ namespace Microsoft.Dafny.Compilers {
     void AddField(DAST.Formal item, _IOption<DAST._IExpression> defaultValue);
 
     public MethodBuilder Method(
-      bool isStatic, bool hasBody,
+      bool isStatic, bool hasBody, bool outVarsAreUninitFieldsToAssign, bool wasFunction,
       ISequence<ISequence<Rune>> overridingPath,
       string name,
       List<DAST.Type> typeArgs,
       Sequence<DAST.Formal> params_,
       List<DAST.Type> outTypes, List<ISequence<Rune>> outVars
     ) {
-      return new MethodBuilder(this, isStatic, hasBody, overridingPath, name, typeArgs, params_, outTypes, outVars);
+      return new MethodBuilder(this, isStatic, hasBody, outVarsAreUninitFieldsToAssign, wasFunction, overridingPath, name, typeArgs, params_, outTypes, outVars);
     }
 
     public object Finish();
@@ -318,6 +318,8 @@ namespace Microsoft.Dafny.Compilers {
     readonly string name;
     readonly bool isStatic;
     readonly bool hasBody;
+    readonly bool outVarsAreUninitFieldsToAssign;
+    readonly bool wasFunction;
     readonly ISequence<ISequence<Rune>> overridingPath;
     readonly List<DAST.Type> typeArgs;
     readonly Sequence<DAST.Formal> params_;
@@ -327,7 +329,7 @@ namespace Microsoft.Dafny.Compilers {
 
     public MethodBuilder(
       ClassLike parent,
-      bool isStatic, bool hasBody,
+      bool isStatic, bool hasBody, bool outVarsAreUninitFieldsToAssign, bool wasFunction,
       ISequence<ISequence<Rune>> overridingPath,
       string name,
       List<DAST.Type> typeArgs,
@@ -337,6 +339,8 @@ namespace Microsoft.Dafny.Compilers {
       this.parent = parent;
       this.isStatic = isStatic;
       this.hasBody = hasBody;
+      this.outVarsAreUninitFieldsToAssign = outVarsAreUninitFieldsToAssign;
+      this.wasFunction = wasFunction;
       this.overridingPath = overridingPath;
       this.name = name;
       this.typeArgs = typeArgs;
@@ -366,6 +370,8 @@ namespace Microsoft.Dafny.Compilers {
       return (DAST.Method)DAST.Method.create(
         isStatic,
         hasBody,
+        outVarsAreUninitFieldsToAssign,
+        wasFunction,
         overridingPath != null ? Option<ISequence<ISequence<Rune>>>.create_Some(overridingPath) : Option<ISequence<ISequence<Rune>>>.create_None(),
         Sequence<Rune>.UnicodeFromString(this.name),
         Sequence<DAST.Type>.FromArray(typeArgs.ToArray()),

@@ -464,8 +464,19 @@ namespace Microsoft.Dafny.Compilers {
         }
 
         var overridingTrait = m.OverriddenMethod?.EnclosingClass;
+        if(m is Constructor {EnclosingClass: TopLevelDeclWithMembers cm}) {
+          // Constructors need to assign all fields without RHS
+          var membersToInitialize = cm.Members.Where((md =>
+            md is Field and not ConstantField {Rhs: { }})); 
+          outVars = membersToInitialize.Select((MemberDecl md) =>
+            Sequence<Rune>.UnicodeFromString(md.GetCompileName(compiler.Options))
+          ).ToList();
+          /*outTypes = membersToInitialize.Select((MemberDecl md) =>
+            GenType(md.GetType())
+          ).ToList();*/
+        }
         var builder = this.builder.Method(
-          m.IsStatic, createBody,
+          m.IsStatic, createBody, m is Constructor, false,
           overridingTrait != null ? compiler.PathFromTopLevel(overridingTrait) : null,
           m.GetCompileName(compiler.Options),
           astTypeArgs, params_,
@@ -509,7 +520,7 @@ namespace Microsoft.Dafny.Compilers {
         var overridingTrait = member.OverriddenMember?.EnclosingClass;
 
         var builder = this.builder.Method(
-          isStatic, createBody,
+          isStatic, createBody, false, true,
           overridingTrait != null ? compiler.PathFromTopLevel(overridingTrait) : null,
           name,
           astTypeArgs, params_,
@@ -536,7 +547,7 @@ namespace Microsoft.Dafny.Compilers {
         var overridingTrait = member.OverriddenMember?.EnclosingClass;
 
         var builder = this.builder.Method(
-          isStatic, createBody,
+          isStatic, createBody, false, true,
           overridingTrait != null ? compiler.PathFromTopLevel(overridingTrait) : null,
           name,
           new(), (Sequence<DAST.Formal>)Sequence<DAST.Formal>.Empty,

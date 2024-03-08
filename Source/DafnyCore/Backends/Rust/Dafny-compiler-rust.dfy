@@ -236,6 +236,11 @@ module RAST
       U8? || U16? || U32? || U64? || U128? || I8? || I16? || I32? || I64? || I128? || Bool?
       || Pointer? || PointerMut?
     }
+    predicate IsSelfPointer() {
+      || (Borrowed? && underlying.PointerMut? && underlying.underlying.SelfOwned?)
+      || (PointerMut? && underlying.SelfOwned?)
+      || (PointerMut? && underlying.TypeApp? && |underlying.arguments| == 0 && underlying.baseName.SelfOwned?)
+    }
     function ExtractMaybePlacebo(): Option<Type> {
       match this {
         case TypeApp(wrapper, arguments) =>
@@ -312,6 +317,7 @@ module RAST
 
   const global_type := TIdentifier("")
   const std_type := global_type.MSel("std")
+  const super_type := TIdentifier("super")
   const cell_type := std_type.MSel("cell")
   const refcell_type := cell_type.MSel("RefCell")
   const dafny_runtime_type := global_type.MSel("dafny_runtime")
@@ -362,15 +368,15 @@ module RAST
     Formal(name: string, tpe: Type)
   {
     function ToString(ind: string): string {
-      if name == "self" && tpe.SelfOwned? then name
-      else if name == "&self" && tpe == Borrowed(SelfOwned) then name
-      else if name == "&mut self" && tpe == Borrowed(SelfBorrowedMut) then name
+      if name == "self" && tpe == SelfOwned then name
+      else if name == "self" && tpe == SelfBorrowed then "&" + name
+      else if name == "self" && tpe == SelfBorrowedMut then "&mut " + name
       else
         name + ": " + tpe.ToString(ind)
     }
-    static const selfBorrowed := Formal("&self", SelfBorrowed)
+    static const selfBorrowed := Formal("self", SelfBorrowed)
     static const selfOwned := Formal("self", SelfOwned)
-    static const selfMut := Formal("&mut self", SelfBorrowedMut)
+    static const selfBorrowedMut := Formal("self", SelfBorrowedMut)
   }
 
   datatype Pattern =
@@ -477,8 +483,18 @@ module RAST
   }
 
   function AssignVar(name: string, rhs: Expr): Expr {
-    Expr.Assign([name], rhs)
+    Expr.Assign(Some(LocalVar(name)), rhs)
   }
+
+  function AssignMember(on: Expr, field: string, rhs: Expr): Expr {
+    Expr.Assign(Some(SelectMember(on, field)), rhs)
+  }
+
+  datatype AssignLhs =
+    LocalVar(name: string) |
+    SelectMember(on: Expr, field: string) |
+    ExtractTuple(names: seq<string>)
+    //| SelectIndex(expr: Expression, indices: seq<Expression>)
 
   datatype Expr =
       RawExpr(content: string)
@@ -496,7 +512,7 @@ module RAST
     | LiteralBool(bvalue: bool)
     | LiteralString(value: string, binary: bool)
     | DeclareVar(declareType: DeclareType, name: string, optType: Option<Type>, optRhs: Option<Expr>) // let mut name: optType = optRhs;
-    | Assign(names: seq<string>, rhs: Expr)           // name1, name2 = rhs;
+    | Assign(names: Option<AssignLhs>, rhs: Expr)           // name1, name2 = rhs;
     | IfExpr(cond: Expr, thn: Expr, els: Expr)       // if cond { thn } else { els }
     | Loop(optCond: Option<Expr>, underlying: Expr)  // loop { body }
     | For(name: string, range: Expr, body: Expr)     // for name in range { body }
@@ -573,7 +589,7 @@ module RAST
           var default := 1 + max(stmt.Height(), rhs.Height());
           match this {
             case StmtExpr(DeclareVar(mod, name, Some(tpe), None), StmtExpr(Assign(name2, rhs), last)) =>
-              if [name] == name2 then
+              if name2 == Some(LocalVar(name)) then
                 1 + default
               else default
             case StmtExpr(IfExpr(UnaryOp("!", BinaryOp("==", a, b, f), of), RawExpr("panic!(\"Halt\");"), RawExpr("")), last) =>
@@ -604,7 +620,10 @@ module RAST
                  case None => 0
                })
         case Assign(names, expr) =>
-          1 + expr.Height()
+          match names {
+            case Some(SelectMember(on, field)) => 1+max(on.Height(), expr.Height())
+            case _ => 1 + expr.Height()
+          }
         case Loop(optCond, underlying) =>
           1 + if optCond.Some? then max(optCond.value.Height(), underlying.Height()) else underlying.Height()
         case Labelled(lbl, underlying) =>
@@ -688,7 +707,7 @@ module RAST
           else
             this
         case StmtExpr(DeclareVar(mod, name, Some(tpe), None), StmtExpr(Assign(name2, rhs), last)) =>
-          if [name] == name2 then
+          if name2 == Some(LocalVar(name)) then
             var rewriting := StmtExpr(DeclareVar(mod, name, Some(tpe), Some(rhs)), last);
             assert rewriting.Height() < this.Height() by {
               assert StmtExpr(Assign(name2, rhs), last).Height() ==
@@ -815,9 +834,12 @@ module RAST
                }
              else " = " + optExprString else "") + ";"
         case Assign(names, expr) =>
-          var lhs := if |names| == 1 then names[0] + " = "
-            else if |names| == 0 then "_ = "
-            else "(" + SeqToString(names, (name: string) => name, ",") + ") = ";
+          var lhs := match names {
+            case Some(LocalVar(name)) => name + " = "
+            case Some(SelectMember(member, field)) => member.ToString(IND) + "." + field + " = "
+            case Some(ExtractTuple(names)) => "(" + SeqToString(names, (name: string) => name, ",") + ") = "
+            case None => "_ = "
+          };
           lhs + expr.ToString(ind + IND) + ";"
         case Labelled(name, underlying) =>
           "'" + name + ": " + underlying.ToString(ind)
@@ -1097,6 +1119,8 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
       Environment(names + [name], types[name := tpe])
     }
   }
+
+  const ASSIGNED_PREFIX := "_assigned_"
 
   class COMP {
     static method GenModule(mod: Module, containingPath: seq<Ident>) returns (s: R.Mod) {
@@ -1766,7 +1790,7 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
             }
             case Trait(_, _) => {
               if p == [Ident.Ident("_System"), Ident.Ident("object")] {
-                s := R.Rc(R.RawType("dyn ::std::any::Any"));
+                s := R.PointerMut(R.DynType(R.super_type.MSel("_System").MSel("object")));
               } else {
                 if inBinding {
                   // impl trait in bindings is not stable
@@ -1938,14 +1962,38 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
         paramNames := paramNames + [name];
         paramTypes := paramTypes[name := formal.tpe];
       }
+      var fnName := escapeIdent(m.name);
+
+      var selfIdentifier: Option<string> := None;
 
       if (!m.isStatic) {
+        var selfId := "self";
+        if fnName == "_ctor" { // Constructors take a raw pointer, which is not accepted as a self type in Rust
+          selfId := "this";
+        }
         if (forTrait) {
-          params := [R.Formal.selfBorrowed] + params;
+          var selfFormal := if m.wasFunction then R.Formal.selfBorrowed else R.Formal.selfBorrowedMut;
+          params := [selfFormal] + params;
         } else {
           var tpe := GenType(enclosingType, false, false);
-          params := [R.Formal("self", R.Borrowed(tpe))] + params;
+          if !tpe.HasCopySemantics() {
+            tpe := R.Borrowed(tpe);
+          }
+          // Special case, pointers receive 
+          if selfId == "self" {
+            if tpe.IsSelfPointer() {
+              if m.wasFunction {
+                tpe := R.SelfBorrowed;
+              } else {
+                tpe := R.SelfBorrowedMut;
+              }
+            } else {
+                print "#### Weird this type: ", tpe, "\n";
+            }
+          }
+          params := [R.Formal(selfId, tpe)] + params;
         }
+        selfIdentifier := Some(selfId);
       }
 
       // TODO: Use mut instead of a tuple for the API of multiple output parameters
@@ -1961,17 +2009,13 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
       }
 
       var visibility := R.PUB;//if forTrait then R.PUB else R.PRIV;
-      var fnName := escapeIdent(m.name);
 
       var typeParamsFiltered := [];
-      var typeParamI := 0;
-      while typeParamI < |m.typeParams| {
+      for typeParamI := 0 to |m.typeParams| {
         var typeParam := m.typeParams[typeParamI];
         if !(typeParam in enclosingTypeParams) {
           typeParamsFiltered := typeParamsFiltered + [typeParam];
         }
-
-        typeParamI := typeParamI + 1;
       }
 
       var whereClauses := "";
@@ -1999,40 +2043,55 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
 
       var fBody: Option<R.Expr>;
       var env: Environment;
+      var preBody := R.RawExpr("");
+      var preAssignNames: seq<string> := [];
+      var preAssignTypes: map<string, R.Type> := map[];
 
       if m.hasBody {
         var earlyReturn: R.Expr := R.Return(None);
         match m.outVars {
           case Some(outVars) => {
+            if m.outVarsAreUninitFieldsToAssign {
+              earlyReturn := R.Return(Some(R.Tuple([])));
+              for outI := 0 to |outVars| {
+                var outVar := outVars[outI];
+                var outName := escapeIdent(outVar.id);
+                var tracker_name := ASSIGNED_PREFIX + outName;
+                preAssignNames := preAssignNames + [tracker_name];
+                preAssignTypes := preAssignTypes[tracker_name := R.Type.Bool];
 
-            var tupleArgs := [];
-            assume {:axiom} |m.outTypes| == |outVars|;
-
-            for outI := 0 to |outVars| {
-              var outVar := outVars[outI];
-              var outType := GenType(m.outTypes[outI], false, false);
-              var outName := escapeIdent(outVar.id);
-              paramNames := paramNames + [outName];
-              var outMaybeType := if outType.HasCopySemantics() then outType else R.MaybePlaceboType(outType);
-              paramTypes := paramTypes[outName := outMaybeType];
-
-              var outVarReturn, _, _ := GenExpr(Expression.Ident(outVar.id), None,
-                Environment([outName], map[outName := outMaybeType]), OwnershipOwned);
-              tupleArgs := tupleArgs + [outVarReturn];
-            }
-            if |tupleArgs| == 1 {
-              earlyReturn := R.Return(Some(tupleArgs[0]));
+                preBody := preBody.Then(R.DeclareVar(R.MUT, tracker_name, Some(R.Type.Bool), Some(R.LiteralBool(false))));
+              }
             } else {
-              earlyReturn := R.Return(Some(R.Tuple(tupleArgs)));
+              var tupleArgs := [];
+              assume {:axiom} |m.outTypes| == |outVars|;
+
+              for outI := 0 to |outVars| {
+                var outVar := outVars[outI];
+                var outType := GenType(m.outTypes[outI], false, false);
+                var outName := escapeIdent(outVar.id);
+                paramNames := paramNames + [outName];
+                var outMaybeType := if outType.HasCopySemantics() then outType else R.MaybePlaceboType(outType);
+                paramTypes := paramTypes[outName := outMaybeType];
+
+                var outVarReturn, _, _ := GenExpr(Expression.Ident(outVar.id), None,
+                  Environment([outName], map[outName := outMaybeType]), OwnershipOwned);
+                tupleArgs := tupleArgs + [outVarReturn];
+              }
+              if |tupleArgs| == 1 {
+                earlyReturn := R.Return(Some(tupleArgs[0]));
+              } else {
+                earlyReturn := R.Return(Some(R.Tuple(tupleArgs)));
+              }
             }
           }
           case None => {}
         }
-        env := Environment(paramNames, paramTypes);
+        env := Environment(preAssignNames + paramNames, preAssignTypes + paramTypes);
 
-        var body, _, _ := GenStmts(m.body, if m.isStatic then None else Some("self"), env, true, earlyReturn);
+        var body, _, _ := GenStmts(m.body, selfIdentifier, env, true, earlyReturn);
 
-        fBody := Some(body);
+        fBody := Some(preBody.Then(body));
       } else {
         env := Environment(paramNames, paramTypes);
         fBody := None;
@@ -2095,15 +2154,16 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
       }
     }
 
-    static method GenAssignLhs(lhs: AssignLhs, rhs: string, selfIdent: Option<string>, env: Environment) returns (generated: string, needsIIFE: bool, readIdents: set<string>)
+    static method GenAssignLhs(lhs: AssignLhs, rhs: R.Expr, selfIdent: Option<string>, env: Environment) returns (generated: R.Expr, needsIIFE: bool, readIdents: set<string>)
       decreases lhs, 1
     {
       match lhs {
         case Ident(Ident(id)) => {
-          if env.IsBorrowed(id) || env.IsBorrowedMut(id) {
-            generated := "*" + escapeIdent(id);
+          var idRust := escapeIdent(id);
+          if env.IsBorrowed(idRust) || env.IsBorrowedMut(idRust) {
+            generated := R.AssignVar("*" + idRust, rhs);
           } else {
-            generated := escapeIdent(id);
+            generated := R.AssignVar(idRust, rhs);
           }
 
           readIdents := {id};
@@ -2111,37 +2171,48 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
         }
 
         case Select(on, field) => {
+          var fieldName := escapeIdent(field);
           var onExpr, onOwned, recIdents := GenExpr(on, selfIdent, env, OwnershipBorrowed);
-          generated := "*(" + onExpr.ToString(IND) + "." + field + ".borrow_mut()) = " + rhs + ";";
+          if onExpr == R.Borrow(R.Identifier("this")) && ASSIGNED_PREFIX + fieldName in env.names { // In the constructor
+            generated := R.dafny_runtime.MSel("update_field_uninit!").Apply([
+              R.Identifier("this"), R.Identifier(fieldName), R.Identifier(ASSIGNED_PREFIX + fieldName), rhs]);
+          } else {
+            if onExpr != R.self {
+              onExpr := R.dafny_runtime.MSel("modify!").Apply1(onExpr);
+            }
+            generated := 
+              R.AssignMember(onExpr, fieldName, rhs);
+          }
           readIdents := recIdents;
-          needsIIFE := true;
+          needsIIFE := false;
         }
 
         case Index(on, indices) => {
           var onExpr, onOwned, recIdents := GenExpr(on, selfIdent, env, OwnershipBorrowed);
           readIdents := recIdents;
 
-          generated := "{\n";
+          var s := "{\n";
 
           var i := 0;
           while i < |indices| {
             var idx, _, recIdentsIdx := GenExpr(indices[i], selfIdent, env, OwnershipOwned);
 
-            generated := generated + "let __idx" + Strings.OfNat(i) + " = <usize as ::dafny_runtime::NumCast>::from(" + idx.ToString(IND) + ").unwrap();\n";
+            s := s + "let __idx" + Strings.OfNat(i) + " = <usize as ::dafny_runtime::NumCast>::from(" + idx.ToString(IND) + ").unwrap();\n";
 
             readIdents := readIdents + recIdentsIdx;
 
             i := i + 1;
           }
 
-          generated := generated + onExpr.ToString(IND) + ".borrow_mut()";
+          s := s + onExpr.ToString(IND) + ".borrow_mut()";
           i := 0;
           while i < |indices| {
-            generated := generated + "[__idx" + Strings.OfNat(i) + "]";
+            s := s + "[__idx" + Strings.OfNat(i) + "]";
             i := i + 1;
           }
 
-          generated := generated + " = " + rhs + ";\n}";
+          s := s + " = " + rhs.ToString(IND) + ";\n}";
+          generated := R.RawExpr(s);
           needsIIFE := true;
         }
       }
@@ -2181,29 +2252,21 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
           generated, readIdents, newEnv := GenStmt(newStmt, selfIdent, env, isLast, earlyReturn);
         }
         case Assign(lhs, expression) => {
-          var lhsGen, needsIIFE, recIdents := GenAssignLhs(lhs, "__rhs", selfIdent, env);
           var exprGen, _, exprIdents := GenExpr(expression, selfIdent, env, OwnershipOwned);
+          if lhs.Ident? {
+            var rustId := escapeIdent(lhs.ident.id);
+            var tpe := env.GetType(rustId);
+            if tpe.Some? && tpe.value.ExtractMaybePlacebo().Some? {
+              exprGen := R.MaybePlacebo(exprGen);
+            }
+          }
+          var lhsGen, needsIIFE, recIdents := GenAssignLhs(lhs, exprGen, selfIdent, env);
+          generated := lhsGen;
 
           if needsIIFE {
-            newEnv := env;
-            generated := R.Block(
-              R.StmtExpr(
-                R.DeclareVar(R.CONST, "__rhs", None, Some(exprGen)),
-                R.RawExpr(lhsGen)
-              )
-            );
-          } else {
-            if lhs.Ident? {
-              var rustId := escapeIdent(lhs.ident.id);
-              var tpe := env.GetType(rustId);
-              if tpe.Some? && tpe.value.ExtractMaybePlacebo().Some? {
-                exprGen := R.MaybePlacebo(exprGen);
-              }
-            }
-            generated := R.AssignVar(lhsGen, exprGen);
-            newEnv := env;
+            generated := R.Block(generated);
           }
-
+          newEnv := env;
           readIdents := recIdents + exprIdents;
         }
         case If(cond, thnDafny, elsDafny) => {
@@ -3174,7 +3237,7 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
         case This() => {
           match selfIdent {
             case Some(id) => {
-              r := R.RawExpr(id);
+              r := R.Identifier(id);
               if expectedOwnership == OwnershipOwned {
                 r := R.Clone(r);
                 resultingOwnership := OwnershipOwned;
@@ -3338,8 +3401,12 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
             readIdents := recIdents;
           } else {
             var onExpr, onOwned, recIdents := GenExpr(on, selfIdent, env, OwnershipAutoBorrowed);
+            r := onExpr;
+            if onExpr != R.self {// self are already borrowed
+              r := R.dafny_runtime.MSel("read!").Apply1(r);
+            }
             // Pointers are owned, no need to borrow them.
-            r := R.dafny_runtime.MSel("read!").Apply1(onExpr).Sel(escapeIdent(field));
+            r := r.Sel(escapeIdent(field));
             r, resultingOwnership := FromOwnership(r, OwnershipBorrowed, expectedOwnership);
             readIdents := recIdents;
           }
@@ -3452,13 +3519,15 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
               onExpr := onExpr.MSel(renderedName);
             }
             case _ => {
-              match name {
-                case Name(_, Some(tpe), _) =>
-                  var typ := GenType(tpe, false, false);
-                  if typ.Pointer? || typ.PointerMut? {
-                    onExpr := R.dafny_runtime.MSel("read!").Apply1(onExpr);
-                  }
-                case _ =>
+              if onExpr != R.self {
+                match name {
+                  case Name(_, Some(tpe), _) =>
+                    var typ := GenType(tpe, false, false);
+                    if typ.Pointer? || typ.PointerMut? {
+                      onExpr := R.dafny_runtime.MSel("read!").Apply1(onExpr);
+                    }
+                  case _ =>
+                }
               }
               onExpr := onExpr.Sel(renderedName);
             }
