@@ -476,6 +476,13 @@ impl <'a> From<&'a [u8]> for DafnyInt {
     }
 }
 
+// Now the same but for &[u8, N] for any kind of such references
+impl <'a, const N: usize> From<&'a [u8; N]> for DafnyInt {
+    fn from(number: &[u8; N]) -> Self {
+        DafnyInt::parse_bytes(number, 10)
+    }
+}
+
 // **************
 // Immutable sequences
 // **************
@@ -660,6 +667,12 @@ where T: DafnyType {
 
     pub fn get(&self, index: &DafnyInt) -> T {
         self.select(index.data.to_usize().unwrap())
+    }
+}
+
+impl <T: DafnyType> Default for Sequence<T> {
+    fn default() -> Self {
+        Sequence::from_array_owned(vec![])
     }
 }
 
@@ -1180,6 +1193,10 @@ impl <V: DafnyTypeEq> Set<V>
     pub fn as_dafny_multiset(&self) -> Multiset<V> {
         Multiset::from_set(self)
     }
+
+    pub fn iter(&self) -> std::collections::hash_set::Iter<'_, V> {
+        self.data.iter()
+    }
 }
 
 pub struct SetBuilder<T>
@@ -1474,6 +1491,14 @@ impl <V: DafnyTypeEq> Hash for Multiset<V> {
 pub trait AsAny {
   fn as_any(&self) -> &dyn Any;
   fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+impl AsAny for dyn Any {
+  fn as_any(&self) -> &dyn Any {
+    self
+  }
+  fn as_any_mut(&mut self) -> &mut dyn Any {
+    self
+  }
 }
 pub fn is_instance_of<C: ?Sized + AsAny, U: 'static>(theobject: *const C) -> bool {
     // safety: Dafny won't call this function unless it can guarantee the object is still allocated
@@ -1973,6 +1998,10 @@ pub fn string_of(s: &str) -> DafnyString {
     s.chars().map(|v| DafnyChar(v)).collect::<Sequence<DafnyChar>>()
 }
 
+pub fn string_utf16_of(s: &str) -> DafnyStringUTF16 {
+    Sequence::from_array_owned(s.encode_utf16().map(|v| DafnyCharUTF16(v)).collect())
+}
+
 
 macro_rules! impl_tuple_print {
     ($($items:ident)*) => {
@@ -2194,6 +2223,89 @@ impl <T: ?Sized> DafnyType for *mut T {}
 
 impl <T: ?Sized> DafnyTypeEq for *mut T {}
 
+
+// BoundedPools with methods such as forall, exists, iter.
+
+trait Forall<T> {
+    fn forall(&self, f: &Rc<dyn Fn(&T) -> bool>) -> bool;
+}
+
+pub struct Range(pub DafnyInt, pub DafnyInt);
+
+impl Range {
+    pub fn new(start: &DafnyInt, end: &DafnyInt) -> Range {
+        Range(start.clone(), end.clone())
+    }
+}
+
+impl Forall<DafnyInt> for Range {
+    fn forall(&self, f: &Rc<dyn Fn(&DafnyInt) -> bool>) -> bool {
+        let mut i: DafnyInt = self.0.clone();
+        while i < self.1.clone() {
+            if !f(&i) {
+                return false;
+            }
+            i = i + int!(1);
+        }
+        true
+    }
+}
+
+impl <V: DafnyTypeEq> Forall<V> for Sequence<V> {
+    fn forall(&self, f: &Rc<dyn Fn(&V) -> bool>) -> bool {
+        let a = self.to_array();
+        let col = a.iter();
+        for v in col {
+            if !f(v) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+impl <V: DafnyTypeEq> Forall<V> for Set<V> {
+    fn forall(&self, f: &Rc<dyn Fn(&V) -> bool>) -> bool {
+        let col = self.data.iter();
+        for v in col {
+            if !f(v) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+
+// Any Dafny trait must require classes extending it to have a method "as_any_mut"
+// that can convert the reference from that trait to a reference of Any
+
+// cast is meant to be used on references only, to downcast a trait reference to a class reference
+#[macro_export]
+macro_rules! cast {
+    ($raw:expr, $id:ty) => {
+        $crate::modify!($raw).as_any_mut().downcast_mut::<$id>().unwrap()
+    }
+}
+
+// 'is' is meant to be used on references only, to check if a trait reference is a class reference
+#[macro_export]
+macro_rules! is {
+    ($raw:expr, $id:ty) => {
+        $crate::modify!($raw).as_any_mut().downcast_mut::<$id>().is_some()
+    }
+}
+
+// cast_any is meant to be used on references only, to convert any references (classes or traits)*
+// to an Any reference trait
+#[macro_export]
+macro_rules! cast_any {
+    ($raw:expr) => {
+        $crate::modify!($raw).as_any_mut()
+    }
+}
+
+
 // When initializing an uninitialized field for the first time,
 // we ensure we don't drop the previous content
 // This is problematic if the same field is overwritten multiple times
@@ -2277,6 +2389,19 @@ macro_rules! update_field_uninit {
             if $field_assigned {
                 $crate::modify!($t).$field = computed_value;
             } else {
+                $crate::update_field_nodrop!($t, $field, computed_value);
+                $field_assigned = true;
+            }
+        }
+    }
+}
+
+// Macro to call at the end of the first new; constructor when not every field is guaranteed to be assigned.
+macro_rules! update_field_if_uninit {
+    ($t:expr, $field:ident, $field_assigned:expr, $value:expr) => {
+        {
+            let computed_value = $value;
+            if !$field_assigned {
                 $crate::update_field_nodrop!($t, $field, computed_value);
                 $field_assigned = true;
             }

@@ -25,6 +25,9 @@ namespace Microsoft.Dafny.Compilers {
   }
 
   public abstract class SinglePassCodeGenerator {
+    
+    protected const string InternalFieldPrefix = "_i_";
+
     public DafnyOptions Options { get; }
 
     /// <summary>
@@ -2098,7 +2101,7 @@ namespace Microsoft.Dafny.Compilers {
             if (cf.Rhs == null && c is ClassLikeDecl) {
               // create a backing field, since this constant field may be assigned in constructors
               Contract.Assert(!cf.IsStatic); // as checked above, only instance members can be inherited
-              classWriter.DeclareField("_" + cf.GetCompileName(Options), c, false, false, cfType, cf.tok, PlaceboValue(cfType, errorWr, cf.tok, true), cf);
+              classWriter.DeclareField(InternalFieldPrefix + cf.GetCompileName(Options), c, false, false, cfType, cf.tok, PlaceboValue(cfType, errorWr, cf.tok, true), cf);
             }
             var w = CreateFunctionOrGetter(cf, IdName(cf), c, false, true, true, classWriter);
             Contract.Assert(w != null);  // since the previous line asked for a body
@@ -2116,7 +2119,7 @@ namespace Microsoft.Dafny.Compilers {
           } else if (member is Field f) {
             var fType = f.Type.Subst(c.ParentFormalTypeParametersToActuals);
             // every field is inherited
-            classWriter.DeclareField("_" + f.GetCompileName(Options), c, false, false, fType, f.tok, PlaceboValue(fType, errorWr, f.tok, true), f);
+            classWriter.DeclareField(InternalFieldPrefix + f.GetCompileName(Options), c, false, false, fType, f.tok, PlaceboValue(fType, errorWr, f.tok, true), f);
             var wGet = classWriter.CreateGetterSetter(IdName(f), f.Type, f.tok, true, member, out var wSet, true);
             {
               var sw = EmitReturnExpr(wGet);
@@ -2204,7 +2207,7 @@ namespace Microsoft.Dafny.Compilers {
                 Contract.Assert(wBody == null);  // since the previous line said not to create a body
               } else if (cf.Rhs == null && c is ClassLikeDecl) {
                 // create a backing field, since this constant field may be assigned in constructors
-                classWriter.DeclareField("_" + f.GetCompileName(Options), c, false, false, f.Type, f.tok, PlaceboValue(f.Type, errorWr, f.tok, true), f);
+                classWriter.DeclareField(InternalFieldPrefix + f.GetCompileName(Options), c, false, false, f.Type, f.tok, PlaceboValue(f.Type, errorWr, f.tok, true), f);
                 wBody = CreateFunctionOrGetter(cf, IdName(cf), c, false, true, false, classWriter);
                 Contract.Assert(wBody != null);  // since the previous line asked for a body
               } else {
@@ -2744,7 +2747,12 @@ namespace Microsoft.Dafny.Compilers {
         } else {
           Contract.Assert(enclosingMethod == null);
           enclosingMethod = m;
-          TrStmtList(m.Body.Body, w);
+          if (m.Body is DividedBlockStmt dividedBlockStmt) {
+            TrDividedBlockStmt((Constructor)m, dividedBlockStmt, w);
+          } else {
+            TrStmtList(m.Body.Body, w);
+          }
+
           Contract.Assert(enclosingMethod == m);
           enclosingMethod = null;
         }
@@ -5013,6 +5021,10 @@ namespace Microsoft.Dafny.Compilers {
       Contract.Assert(n == inTmps.Count);
       // finally, the jump back to the head of the method
       EmitJumpToTailCallStart(wr);
+    }
+
+    protected virtual void TrDividedBlockStmt(Constructor m, DividedBlockStmt dividedBlockStmt, ConcreteSyntaxTree writer) {
+      TrStmtList(dividedBlockStmt.Body, writer);
     }
 
     protected virtual void TrStmtList(List<Statement> stmts, ConcreteSyntaxTree writer) {

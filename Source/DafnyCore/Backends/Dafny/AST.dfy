@@ -121,7 +121,8 @@ module {:extern "DAST"} DAST {
     TailRecursive(body: seq<Statement>) |
     JumpTailCallStart() |
     Halt() |
-    Print(Expression)
+    Print(Expression) |
+    ConstructorNewSeparator(fields: seq<Formal>)
   {
   }
 
@@ -178,11 +179,11 @@ module {:extern "DAST"} DAST {
     ArrayLen(expr: Expression, dim: nat) |
     MapKeys(expr: Expression) |
     MapValues(expr: Expression) |
-    Select(expr: Expression, field: string, isConstant: bool, onDatatype: bool) |
+    Select(expr: Expression, field: string, isConstant: bool, onDatatype: bool, fieldType: Type) |
     SelectFn(expr: Expression, field: string, onDatatype: bool, isStatic: bool, arity: nat) |
     Index(expr: Expression, collKind: CollKind, indices: seq<Expression>) |
     IndexRange(expr: Expression, isArray: bool, low: Option<Expression>, high: Option<Expression>) |
-    TupleSelect(expr: Expression, index: nat) |
+    TupleSelect(expr: Expression, index: nat, fieldType: Type) |
     Call(on: Expression, callName: CallName, typeArgs: seq<Type>, args: seq<Expression>) |
     Lambda(params: seq<Formal>, retType: Type, body: seq<Statement>) |
     BetaRedex(values: seq<(Formal, Expression)>, retType: Type, expr: Expression) |

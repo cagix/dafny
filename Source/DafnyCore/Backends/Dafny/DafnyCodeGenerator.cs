@@ -10,11 +10,13 @@ using System.Linq;
 using System.Diagnostics.Contracts;
 using System.IO;
 using DAST.Format;
+using Microsoft.Boogie;
 using Std.Wrappers;
 
 namespace Microsoft.Dafny.Compilers {
 
   class DafnyCodeGenerator : SinglePassCodeGenerator {
+    
     ProgramBuilder items;
     public object currentBuilder;
     public bool testing;
@@ -423,6 +425,28 @@ namespace Microsoft.Dafny.Compilers {
       return params_;
     }
 
+    protected override void TrDividedBlockStmt(Constructor m, DividedBlockStmt dividedBlockStmt, ConcreteSyntaxTree writer) {
+      TrStmtList(dividedBlockStmt.BodyInit, writer);
+      if (writer is BuilderSyntaxTree<StatementContainer> builder) {
+        var membersToInitialize = ((TopLevelDeclWithMembers)m.EnclosingClass).Members.Where((md =>
+          md is Field and not ConstantField {Rhs: { }})); 
+        var outFormals = membersToInitialize.Select((MemberDecl md) =>
+          DAST.Formal.create_Formal(
+          Sequence<Rune>.UnicodeFromString(
+            (md is ConstantField ? InternalFieldPrefix : "") +
+            md.GetCompileName(Options)),
+              GenType(((Field)md).Type.Subst(((TopLevelDeclWithMembers)((Field)md).EnclosingClass).ParentFormalTypeParametersToActuals))
+          )
+        ).ToList();
+        builder.Builder.AddStatement((DAST.Statement)DAST.Statement.create_ConstructorNewSeparator(
+          Sequence<_IFormal>.FromArray(outFormals.ToArray())));
+      } else {
+        throw new InvalidCastException("Divided block statement outside of a statement container");
+      }
+        // We need to indicate to Dafny that 
+      TrStmtList(dividedBlockStmt.BodyProper, writer);
+    }
+
     private class ClassWriter : IClassWriter {
       private readonly DafnyCodeGenerator compiler;
       private readonly ClassLike builder;
@@ -469,7 +493,9 @@ namespace Microsoft.Dafny.Compilers {
           var membersToInitialize = cm.Members.Where((md =>
             md is Field and not ConstantField {Rhs: { }})); 
           outVars = membersToInitialize.Select((MemberDecl md) =>
-            Sequence<Rune>.UnicodeFromString(md.GetCompileName(compiler.Options))
+            Sequence<Rune>.UnicodeFromString(
+              (md is ConstantField ? InternalFieldPrefix : "") +
+              md.GetCompileName(compiler.Options))
           ).ToList();
           /*outTypes = membersToInitialize.Select((MemberDecl md) =>
             GenType(md.GetType())
@@ -754,10 +780,11 @@ namespace Microsoft.Dafny.Compilers {
     protected override void EmitNameAndActualTypeArgs(string protectedName, List<Type> typeArgs, IToken tok,
      Expression replacementReceiver, bool receiverAsArgument, ConcreteSyntaxTree wr) {
       Sequence<_IFormal> receiverArgs = null;
-      Option<DAST.Type> receiverType = replacementReceiver != null && !receiverAsArgument
+      var receiverBeforeName = replacementReceiver != null && replacementReceiver is not StaticReceiverExpr;
+      Option<DAST.Type> receiverType = receiverBeforeName && !receiverAsArgument
         ? (Option<DAST.Type>) Option<DAST.Type>.create_Some(GenType(replacementReceiver.Type))
         : (Option<DAST.Type>) Option<DAST.Type>.create_None();
-      if (replacementReceiver != null) {
+      if (receiverBeforeName) {
         var name = replacementReceiver is IdentifierExpr {Var: {CompileName: var compileName}}
           ? compileName
           : "receiver";
@@ -1661,7 +1688,7 @@ namespace Microsoft.Dafny.Compilers {
         if (dtor.EnclosingClass is TupleTypeDecl) {
           return new ExprLvalue((DAST.Expression)DAST.Expression.create_TupleSelect(
             objExpr,
-            int.Parse(dtor.CorrespondingFormals[0].NameForCompilation)
+            int.Parse(dtor.CorrespondingFormals[0].NameForCompilation), GenType(expectedType)
           ), null, this);
         } else {
           var compileName = GetExtractOverrideName(member.Attributes, member.GetCompileName(Options));
@@ -1669,7 +1696,7 @@ namespace Microsoft.Dafny.Compilers {
             objExpr,
             Sequence<Rune>.UnicodeFromString(compileName),
             member is ConstantField,
-            member.EnclosingClass is DatatypeDecl
+            member.EnclosingClass is DatatypeDecl, GenType(expectedType)
           ), (DAST.AssignLhs)DAST.AssignLhs.create_Select(
             objExpr,
             Sequence<Rune>.UnicodeFromString(member.GetCompileName(Options))
@@ -1706,7 +1733,7 @@ namespace Microsoft.Dafny.Compilers {
           objExpr,
           Sequence<Rune>.UnicodeFromString(compiledName),
           member is ConstantField,
-          member.EnclosingClass is DatatypeDecl
+          member.EnclosingClass is DatatypeDecl, GenType(expectedType)
         ), (DAST.AssignLhs)DAST.AssignLhs.create_Select(
           objExpr,
           Sequence<Rune>.UnicodeFromString(compiledName)
@@ -1735,19 +1762,19 @@ namespace Microsoft.Dafny.Compilers {
         } else if (internalAccess && (member is ConstantField || member.EnclosingClass is TraitDecl)) {
           return new ExprLvalue((DAST.Expression)DAST.Expression.create_Select(
             objExpr,
-            Sequence<Rune>.UnicodeFromString("_" + member.GetCompileName(Options)),
+            Sequence<Rune>.UnicodeFromString(InternalFieldPrefix + member.GetCompileName(Options)),
             false,
-            member.EnclosingClass is DatatypeDecl
+            member.EnclosingClass is DatatypeDecl, GenType(expectedType)
           ), (DAST.AssignLhs)DAST.AssignLhs.create_Select(
             objExpr,
-            Sequence<Rune>.UnicodeFromString("_" + member.GetCompileName(Options))
+            Sequence<Rune>.UnicodeFromString(InternalFieldPrefix + member.GetCompileName(Options))
           ), this);
         } else {
           return new ExprLvalue((DAST.Expression)DAST.Expression.create_Select(
             objExpr,
             Sequence<Rune>.UnicodeFromString(member.GetCompileName(Options)),
             member is ConstantField,
-            member.EnclosingClass is DatatypeDecl
+            member.EnclosingClass is DatatypeDecl, GenType(expectedType)
           ), (DAST.AssignLhs)DAST.AssignLhs.create_Select(
             objExpr,
             Sequence<Rune>.UnicodeFromString(member.GetCompileName(Options))
@@ -2004,7 +2031,7 @@ namespace Microsoft.Dafny.Compilers {
           if (ctor.EnclosingDatatype is TupleTypeDecl) {
             builder.Builder.AddExpr((DAST.Expression)DAST.Expression.create_TupleSelect(
               sourceAST,
-              int.Parse(dtor.NameForCompilation)
+              int.Parse(dtor.NameForCompilation), GenType(dtor.Type)
             ));
           } else {
             var compileName = GetExtractOverrideName(dtor.Attributes, dtor.CompileName);
@@ -2012,7 +2039,7 @@ namespace Microsoft.Dafny.Compilers {
               sourceAST,
               Sequence<Rune>.UnicodeFromString(compileName),
               false,
-              true
+              true, GenType(dtor.Type)
             ));
           }
         }

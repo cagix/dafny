@@ -76,7 +76,7 @@ module RAST
       Attribute.ToStringMultiple(attributes, ind) +
       "pub struct " + name +
       TypeParam.ToStringMultiple(typeParams, ind) +
-      fields.ToString(ind + IND, fields.NamedFields?) +
+      fields.ToString(ind, fields.NamedFields?) +
       (if fields.NamelessFields? then ";" else "")
     }
   }
@@ -836,7 +836,9 @@ module RAST
         case Assign(names, expr) =>
           var lhs := match names {
             case Some(LocalVar(name)) => name + " = "
-            case Some(SelectMember(member, field)) => member.ToString(IND) + "." + field + " = "
+            case Some(SelectMember(member, field)) =>
+              var (leftP, rightP) := Select(member, field).LeftParentheses(member);
+              leftP + member.ToString(IND) + rightP + "." + field + " = "
             case Some(ExtractTuple(names)) => "(" + SeqToString(names, (name: string) => name, ",") + ") = "
             case None => "_ = "
           };
@@ -1118,10 +1120,25 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
     {
       Environment(names + [name], types[name := tpe])
     }
+    function RemoveAssigned(name: string): Environment
+      requires name in names
+    {
+      var indexInEnv := Std.Collections.Seq.IndexOf(names, name);
+      Environment(
+        names[0..indexInEnv] + names[indexInEnv + 1..],
+        types - {name}
+      )
+    }
   }
 
-  const ASSIGNED_PREFIX := "_assigned_"
+  const ASSIGNED_PREFIX := "_set"
 
+  function AddAssignedPrefix(rustName: string): string {
+    if |rustName| >= 2 && rustName[0..2] == "r#" then
+      ASSIGNED_PREFIX + rustName[2..]
+    else
+      ASSIGNED_PREFIX + "_" + rustName
+  }
   class COMP {
     static method GenModule(mod: Module, containingPath: seq<Ident>) returns (s: R.Mod) {
       var body := GenModuleBody(mod.body, containingPath + [Ident.Ident(mod.name)]);
@@ -1212,6 +1229,11 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
           case None => {
             // TODO(mikael) Use type descriptors for default values if generics
             var default := R.std_Default_default;
+            if fieldType.PointerMut? {
+              default := R.std.MSel("ptr").MSel("null_mut").Apply([]);
+            } else if fieldType.Pointer? {
+              default := R.std.MSel("ptr").MSel("null").Apply([]);
+            }
             fieldInits := fieldInits + [
               R.AssignIdentifier(
                 fieldRustName, default)];
@@ -1254,20 +1276,17 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
         ResolvedType.AllocatedDatatype(DatatypeType(path, c.attributes))), typeParamsSet);
       var implBody :=
         [R.FnDecl(
-           R.PUB,
-           R.Fn(
-             "new",
-             [], [], Some(R.SelfOwned),
-             "",
-             Some(
-              R.StructBuild(
-                    R.Identifier(datatypeName),
-                    fieldInits
-                  ))
+          R.PUB,
+          R.Fn("new", [], [], Some(R.SelfOwned), "",
+               Some(
+                    R.StructBuild(
+                      R.Identifier(datatypeName),
+                      fieldInits
+                    ))
            ))] + [
               R.FnDecl(
                 R.PUB,
-                R.Fn("allocated",
+                R.Fn("_allocated",
                   [], [], Some(R.SelfPointerMut),
                   "",
                   Some(
@@ -1790,7 +1809,7 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
             }
             case Trait(_, _) => {
               if p == [Ident.Ident("_System"), Ident.Ident("object")] {
-                s := R.PointerMut(R.DynType(R.super_type.MSel("_System").MSel("object")));
+                s := R.PointerMut(R.DynType(R.std_type.MSel("any").MSel("Any")));
               } else {
                 if inBinding {
                   // impl trait in bindings is not stable
@@ -2056,7 +2075,7 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
               for outI := 0 to |outVars| {
                 var outVar := outVars[outI];
                 var outName := escapeIdent(outVar.id);
-                var tracker_name := ASSIGNED_PREFIX + outName;
+                var tracker_name := AddAssignedPrefix(outName);
                 preAssignNames := preAssignNames + [tracker_name];
                 preAssignTypes := preAssignTypes[tracker_name := R.Type.Bool];
 
@@ -2154,9 +2173,10 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
       }
     }
 
-    static method GenAssignLhs(lhs: AssignLhs, rhs: R.Expr, selfIdent: Option<string>, env: Environment) returns (generated: R.Expr, needsIIFE: bool, readIdents: set<string>)
+    static method GenAssignLhs(lhs: AssignLhs, rhs: R.Expr, selfIdent: Option<string>, env: Environment) returns (generated: R.Expr, needsIIFE: bool, readIdents: set<string>, newEnv: Environment)
       decreases lhs, 1
     {
+      newEnv := env;
       match lhs {
         case Ident(Ident(id)) => {
           var idRust := escapeIdent(id);
@@ -2172,16 +2192,20 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
 
         case Select(on, field) => {
           var fieldName := escapeIdent(field);
-          var onExpr, onOwned, recIdents := GenExpr(on, selfIdent, env, OwnershipBorrowed);
-          if onExpr == R.Borrow(R.Identifier("this")) && ASSIGNED_PREFIX + fieldName in env.names { // In the constructor
-            generated := R.dafny_runtime.MSel("update_field_uninit!").Apply([
-              R.Identifier("this"), R.Identifier(fieldName), R.Identifier(ASSIGNED_PREFIX + fieldName), rhs]);
-          } else {
-            if onExpr != R.self {
-              onExpr := R.dafny_runtime.MSel("modify!").Apply1(onExpr);
-            }
-            generated := 
-              R.AssignMember(onExpr, fieldName, rhs);
+          var onExpr, onOwned, recIdents := GenExpr(on, selfIdent, env, OwnershipBorrowedMut);
+          print "Environment: ", env, ", on = ", on, "\n";
+          print "Select on GenAssignLhs: ", lhs, ", fieldName =", fieldName, ", onExpr=", onExpr, "\n";
+          generated := 
+            R.AssignMember(onExpr, fieldName, rhs);
+          match onExpr { // Particular case of the constructor, we don't want the previous value to be dropped if it's assigned the first time
+            case UnaryOp("&mut", Identifier("this"), _) | Identifier("this") =>
+              var isAssignedVar := AddAssignedPrefix(fieldName);
+              if isAssignedVar in newEnv.names {
+                generated := R.dafny_runtime.MSel("update_field_uninit!").Apply([
+                  R.Identifier("this"), R.Identifier(fieldName), R.Identifier(isAssignedVar), rhs]);
+                newEnv := newEnv.RemoveAssigned(isAssignedVar);
+              }
+            case _ =>
           }
           readIdents := recIdents;
           needsIIFE := false;
@@ -2222,6 +2246,24 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
       decreases stmt, 1, 1
     {
       match stmt {
+        case ConstructorNewSeparator(fields) => {
+          generated := R.RawExpr("");
+          readIdents := {};
+          newEnv := env;
+          for i := 0 to |fields| {
+            var fieldName := escapeIdent(fields[0].name);
+            var fieldTyp := GenType(fields[0].typ, false, false);
+            var isAssignedVar := AddAssignedPrefix(fieldName);
+            if isAssignedVar in newEnv.names {
+              assume {:axiom} InitializationValue(fields[0].typ) < stmt; // Needed for termination
+              var rhs, _, _ := GenExpr(InitializationValue(fields[0].typ), selfIdent, env, OwnershipOwned);
+              readIdents := readIdents + {isAssignedVar};
+              generated := generated.Then(R.dafny_runtime.MSel("update_field_if_uninit!").Apply([
+                  R.Identifier("this"), R.Identifier(fieldName), R.Identifier(isAssignedVar), rhs]));
+              newEnv := newEnv.RemoveAssigned(isAssignedVar);
+            }
+          }
+        }
         case DeclareVar(name, typ, Some(expression)) => {
           var tpe := GenType(typ, true, false);
           var varName := escapeIdent(name);
@@ -2260,13 +2302,13 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
               exprGen := R.MaybePlacebo(exprGen);
             }
           }
-          var lhsGen, needsIIFE, recIdents := GenAssignLhs(lhs, exprGen, selfIdent, env);
+          var lhsGen, needsIIFE, recIdents, resEnv := GenAssignLhs(lhs, exprGen, selfIdent, env);
           generated := lhsGen;
+          newEnv := resEnv;
 
           if needsIIFE {
             generated := R.Block(generated);
           }
-          newEnv := env;
           readIdents := recIdents + exprIdents;
         }
         case If(cond, thnDafny, elsDafny) => {
@@ -2977,10 +3019,16 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
             resultingOwnership := OwnershipOwned;
             // No need to do anything
           } else if expectedOwnership == OwnershipBorrowedMut {
-            r := R.BorrowMut(r); // Needs to be explicit for out-parameters on methods
+            if tpe.Some? && (tpe.value.PointerMut? || tpe.value.Pointer?) {
+              r := R.dafny_runtime.MSel("modify!").Apply1(r);
+            } else {
+              r := R.BorrowMut(r); // Needs to be explicit for out-parameters on methods
+            }
             resultingOwnership := OwnershipBorrowedMut;
           } else if expectedOwnership == OwnershipOwned {
             if !noNeedOfClone {
+              print "Cloning id " + name + " to:\n"; 
+              print "Environment: ", env, "\n";
               r := R.Clone(r); // We don't transfer the ownership of an identifier
             }
             resultingOwnership := OwnershipOwned;
@@ -2988,8 +3036,12 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
             assert expectedOwnership == OwnershipBorrowed;
             resultingOwnership := OwnershipBorrowed;
           } else {
-            // It's currently owned.
-            r := R.Borrow(r);
+            // It's currently owned. If it's a pointer, we need to convert it to a borrow
+            if tpe.Some? && (tpe.value.PointerMut? || tpe.value.Pointer?) {
+              r := R.dafny_runtime.MSel("read!").Apply1(r);
+            } else {
+              r := R.Borrow(r); // Needs to be explicit for out-parameters on methods
+            }
             resultingOwnership := OwnershipBorrowed;
           }
           readIdents := {name};
@@ -3003,7 +3055,13 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
         }
         case InitializationValue(typ) => {
           var typExpr := GenType(typ, false, false);
-          r := R.RawExpr("<" + typExpr.ToString(IND) + " as std::default::Default>::default()");
+          print "Getting initialization value for ", typ, ":";
+          if typExpr.PointerMut? {
+            r := R.std.MSel("ptr").MSel("null_mut").Apply([]);
+          } else {
+            r := R.RawExpr("<" + typExpr.ToString(IND) + " as std::default::Default>::default()");
+          }
+          print r, "\n";
           r, resultingOwnership := FromOwned(r, expectedOwnership);
           readIdents := {};
           return;
@@ -3042,7 +3100,7 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
             }
             r := r.ApplyType(typeExprs);
           }
-          r := r.MSel("allocated");
+          r := r.MSel("_allocated");
 
           readIdents := {};
           var arguments := [];
@@ -3384,7 +3442,7 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
           readIdents := recIdents;
           return;
         }
-        case Select(Companion(c), field, isConstant, isDatatype) => {
+        case Select(Companion(c), field, isConstant, isDatatype, fieldType) => {
           var onExpr, onOwned, recIdents := GenExpr(Companion(c), selfIdent, env, OwnershipBorrowed);
 
           r := onExpr.MSel(escapeIdent(field)).Apply([]);
@@ -3393,19 +3451,30 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
           readIdents := recIdents;
           return;
         }
-        case Select(on, field, isConstant, isDatatype) => {
+        case Select(on, field, isConstant, isDatatype, fieldType) => {
           if isDatatype || isConstant {
             var onExpr, onOwned, recIdents := GenExpr(on, selfIdent, env, OwnershipBorrowed);
             r := onExpr.Sel(escapeIdent(field)).Apply([]);
-            r, resultingOwnership := FromOwnership(r, OwnershipBorrowed, expectedOwnership);
+            var typ := GenType(fieldType, false, false);
+            if typ.HasCopySemantics() &&
+               (expectedOwnership == OwnershipOwned ||  expectedOwnership == OwnershipAutoBorrowed) {
+              resultingOwnership := OwnershipOwned;
+            } else {
+              r, resultingOwnership := FromOwnership(r, OwnershipBorrowed, expectedOwnership);
+            }
             readIdents := recIdents;
           } else {
             var onExpr, onOwned, recIdents := GenExpr(on, selfIdent, env, OwnershipAutoBorrowed);
             r := onExpr;
             if onExpr != R.self {// self are already borrowed
+              match onExpr { // Special case, the constructor.
+                case UnaryOp("&", Identifier("this"), _) =>
+                  r := R.Identifier("this");
+                case _ =>
+              }
+              print "Selection of not self: ", on, "\n", onExpr, "\nonOwned = ", onOwned, "\n";
               r := R.dafny_runtime.MSel("read!").Apply1(r);
             }
-            // Pointers are owned, no need to borrow them.
             r := r.Sel(escapeIdent(field));
             r, resultingOwnership := FromOwnership(r, OwnershipBorrowed, expectedOwnership);
             readIdents := recIdents;
@@ -3472,7 +3541,7 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
           r, resultingOwnership := FromOwned(r, expectedOwnership);
           return;
         }
-        case TupleSelect(on, idx) => {
+        case TupleSelect(on, idx, fieldType) => {
           var onExpr, onOwnership, recIdents := GenExpr(on, selfIdent, env, OwnershipAutoBorrowed);
           r := onExpr.Sel(Strings.OfNat(idx));
           r, resultingOwnership := FromOwnership(r, onOwnership, expectedOwnership);
