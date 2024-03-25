@@ -315,6 +315,19 @@ module RAST
     }
   }
 
+  predicate IsImmutableConversion(fromTpe: Type, toTpe: Type) {
+    match (fromTpe, toTpe) {
+      case (TypeApp(TMemberSelect(TMemberSelect(TIdentifier(""), "dafny_runtime"), tpe1), elems1),
+            TypeApp(TMemberSelect(TMemberSelect(TIdentifier(""), "dafny_runtime"), tpe2), elems2))
+       =>
+       tpe1 == tpe2 && (
+        tpe1 == "Set" || tpe1 == "Sequence" || tpe1 == "Multiset" || tpe1 == "Map"
+       )
+      case _ =>
+        false
+    }
+  }
+
   const global_type := TIdentifier("")
   const std_type := global_type.MSel("std")
   const super_type := TIdentifier("super")
@@ -1151,11 +1164,6 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
 
     static method GenModuleBody(body: seq<ModuleItem>, containingPath: seq<Ident>) returns (s: seq<R.ModDecl>) {
       s := [];
-      if containingPath == [Ident.Ident("_System")] {
-        s := s + [
-          R.TraitDecl(R.Trait([], R.TIdentifier("object"), "", []))
-        ];
-      }
       for i := 0 to |body| {
         var generated;
         match body[i] {
@@ -2251,12 +2259,13 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
           readIdents := {};
           newEnv := env;
           for i := 0 to |fields| {
-            var fieldName := escapeIdent(fields[0].name);
-            var fieldTyp := GenType(fields[0].typ, false, false);
+            var field := fields[i];
+            var fieldName := escapeIdent(field.name);
+            var fieldTyp := GenType(field.typ, false, false);
             var isAssignedVar := AddAssignedPrefix(fieldName);
             if isAssignedVar in newEnv.names {
-              assume {:axiom} InitializationValue(fields[0].typ) < stmt; // Needed for termination
-              var rhs, _, _ := GenExpr(InitializationValue(fields[0].typ), selfIdent, env, OwnershipOwned);
+              assume {:axiom} InitializationValue(field.typ) < stmt; // Needed for termination
+              var rhs, _, _ := GenExpr(InitializationValue(field.typ), selfIdent, env, OwnershipOwned);
               readIdents := readIdents + {isAssignedVar};
               generated := generated.Then(R.dafny_runtime.MSel("update_field_if_uninit!").Apply([
                   R.Identifier("this"), R.Identifier(fieldName), R.Identifier(isAssignedVar), rhs]));
@@ -2565,6 +2574,11 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
       ensures expectedOwnership != OwnershipAutoBorrowed
               ==> resultingOwnership == expectedOwnership
     {
+      if ownership == expectedOwnership {
+        out := r;
+        resultingOwnership := expectedOwnership;
+        return;
+      }
       if ownership == OwnershipOwned {
         out, resultingOwnership := FromOwned(r, expectedOwnership);
         return;
@@ -2983,9 +2997,16 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
             var fromTpeGen := GenType(fromTpe, true, false);
             var toTpeGen := GenType(toTpe, true, false);
             var recursiveGen, recOwned, recIdents := GenExpr(expr, selfIdent, env, expectedOwnership);
-            r := R.RawExpr("(" + recursiveGen.ToString(IND) + "/* <i>Coercion from " + fromTpeGen.ToString(IND) + " to " + toTpeGen.ToString(IND) + "</i> not yet implemented */)");
-            r, resultingOwnership := FromOwnership(r, recOwned, expectedOwnership);
             readIdents := recIdents;
+            if R.IsImmutableConversion(fromTpeGen, toTpeGen) {
+              // Only tolerated immutable conversions are covariants
+              r, resultingOwnership := FromOwnership(r, recOwned, OwnershipOwned);
+              r := R.dafny_runtime.MSel("UpcastTo").ApplyType([toTpeGen]).MSel("upcast_to").Apply([recursiveGen]);
+              r, resultingOwnership := FromOwnership(r, OwnershipOwned, expectedOwnership);
+            } else {
+              r := R.RawExpr("(" + recursiveGen.ToString(IND) + "/* <i>Coercion from " + fromTpeGen.ToString(IND) + " to " + toTpeGen.ToString(IND) + "</i> not yet implemented */)");
+              r, resultingOwnership := FromOwnership(r, recOwned, expectedOwnership);
+            }
           }
         }
       }
@@ -3008,8 +3029,8 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
           r := R.Identifier(rName);
           var tpe := env.GetType(rName);
           var placeboOpt := if tpe.Some? then tpe.value.ExtractMaybePlacebo() else None;
-          var currentlyBorrowed := env.IsBorrowed(name); // Otherwise names are owned 
-          var noNeedOfClone := env.HasCopySemantics(name);
+          var currentlyBorrowed := env.IsBorrowed(rName); // Otherwise names are owned 
+          var noNeedOfClone := env.HasCopySemantics(rName);
           if placeboOpt.Some? {
             r := r.Sel("read").Apply([]);
             currentlyBorrowed := false;
@@ -3452,8 +3473,8 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
           return;
         }
         case Select(on, field, isConstant, isDatatype, fieldType) => {
-          if isDatatype || isConstant {
-            var onExpr, onOwned, recIdents := GenExpr(on, selfIdent, env, OwnershipBorrowed);
+          if isDatatype {
+            var onExpr, onOwned, recIdents := GenExpr(on, selfIdent, env, OwnershipAutoBorrowed);
             r := onExpr.Sel(escapeIdent(field)).Apply([]);
             var typ := GenType(fieldType, false, false);
             if typ.HasCopySemantics() &&
@@ -3476,7 +3497,11 @@ abstract module {:extern "DafnyToRustCompilerAbstract"} DafnyToRustCompilerAbstr
               r := R.dafny_runtime.MSel("read!").Apply1(r);
             }
             r := r.Sel(escapeIdent(field));
-            r, resultingOwnership := FromOwnership(r, OwnershipBorrowed, expectedOwnership);
+            if isConstant {
+              r := r.Apply([]);
+            }
+            var fromOwnership := if isConstant then OwnershipOwned else OwnershipBorrowed;
+            r, resultingOwnership := FromOwnership(r, fromOwnership, expectedOwnership);
             readIdents := recIdents;
           }
           return;

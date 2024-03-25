@@ -43,7 +43,7 @@ mod tests {
             },
             _ => panic!("This should never happen")        
         }
-        let value = concat.select(0);
+        let value = concat.get_usize(0);
         assert_eq!(value, 1);
         match &concat {
             crate::Sequence::ConcatSequence { boxed, ..} => {
@@ -237,6 +237,14 @@ mod tests {
         /*const*/next: *mut ClassWrapper<T>,
         /*const*/constant: crate::DafnyInt
     }
+    impl <T> AsAny for ClassWrapper<T> where T: 'static {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
+    }
     impl <T: Clone> ClassWrapper<T> {
         fn constant_plus_x(&self) -> crate::DafnyInt {
             self.constant.clone() + self.x.clone()
@@ -395,78 +403,23 @@ mod tests {
         assert_eq!(c.read(), 3);
         assert_eq!(d.read(), 4);
     }
-}
-// Struct containing two reference-counted fields
-
-
-mod node_graph {
-    use std::rc::Rc;
-    use std::cell::RefCell;
-    type NodeRef<I> = Rc<RefCell<_Node<I>>>;
-
-    #[derive(Clone)]
-    // The private representation of a node.
-    struct _Node<I> {
-        inner_value: I,
-        adjacent: Vec<NodeRef<I>>,
-    }
-    #[derive(Clone)]
-    // The public representation of a node, with some syntactic sugar.
-    struct Node<I>(NodeRef<I>);
-
-    impl<I> Node<I> {
-        // Creates a new node with no edges.
-        fn new(inner: I) -> Node<I> {
-            let node = _Node { inner_value: inner, adjacent: vec![] };
-            Node(Rc::new(RefCell::new(node)))
-        }
-
-        // Adds a directed edge from this node to other node.
-        fn add_adjacent(&self, other: &Node<I>) {
-            (self.0.borrow_mut()).adjacent.push(other.0.clone());
-        }
-    }
-    #[derive(Clone)]
-    struct Graph<I> {
-        nodes: Vec<Node<I>>,
-    }
-
-    impl<I> Graph<I> {
-        fn with_nodes(nodes: Vec<Node<I>>) -> Self {
-            Graph { nodes: nodes }
-        }
-    }
-
-    impl <I>  Drop for Graph<I> {
-        fn drop(&mut self) {
-            // Drop all the nodes in the graph by removing all their edges
-            for node in self.nodes.iter() {
-                let mut node = node.0.borrow_mut();
-                node.adjacent.clear();
-            }
-        }
-    }
-    impl <I> Drop for Node<I> {
-        fn drop(&mut self) {
-            // Drop all the edges from this node
-            let mut node: std::cell::RefMut<'_, _Node<I>> = self.0.borrow_mut();
-            //node.adjacent.clear();
-        }
-    }
 
     #[test]
-    fn test() {
-        let a = Node::new(1);
-        let b = Node::new(2);
-        assert_eq!(Rc::strong_count(&a.0), 1);
-        assert_eq!(Rc::strong_count(&b.0), 1);
-        a.add_adjacent(&b);
-        assert_eq!(Rc::strong_count(&a.0), 1);
-        assert_eq!(Rc::strong_count(&b.0), 2);
-        b.add_adjacent(&a);
-        assert_eq!(Rc::strong_count(&a.0), 2);
-        assert_eq!(Rc::strong_count(&b.0), 2);
-        drop(b);
-        assert_eq!(Rc::strong_count(&a.0), 1);
+    fn test_coercion_immutable() {
+        let o = ClassWrapper::<i32>::constructor(1);
+        let a = UpcastTo::<*mut dyn Any>::upcast_to(&o);
+        assert_eq!(cast!(a, ClassWrapper<i32>), o);
+        let seq_o = seq![o];
+        let seq_a = UpcastTo::<Sequence<*mut dyn Any>>::upcast_to(&seq_o);
+        assert_eq!(cast!(seq_a.get_usize(0), ClassWrapper<i32>), o);
+        let set_o = set!{o};
+        let set_a = UpcastTo::<Set<*mut dyn Any>>::upcast_to(&set_o);
+        assert_eq!(cast!(set_a.peek(), ClassWrapper<i32>), o);
+        let multiset_o = multiset!{o, o};
+        let multiset_a = UpcastTo::<Multiset<*mut dyn Any>>::upcast_to(&multiset_o);
+        assert_eq!(cast!(multiset_a.peek(), ClassWrapper<i32>), o);
+        let map_o = map![1 => o, 2 => o];
+        let map_a = UpcastTo::<Map<i32, *mut dyn Any>>::upcast_to(&map_o);
+        assert_eq!(cast!(map_a.get(&1), ClassWrapper<i32>), o);
     }
 }

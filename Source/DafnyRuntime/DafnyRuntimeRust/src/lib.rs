@@ -1,7 +1,6 @@
 #[cfg(test)]
 mod tests;
-use std::{any::Any, borrow::Borrow, cell::{RefCell, UnsafeCell}, cmp::Ordering, collections::{HashMap, HashSet}, fmt::{write, Debug, Display, Formatter}, hash::{Hash, Hasher}, mem, ops::{Add, Deref, Div, Mul, Neg, Rem, Sub}, rc::Rc};
-use as_any::Downcast;
+use std::{any::Any, borrow::Borrow, cell::{RefCell, UnsafeCell}, cmp::Ordering, collections::{HashMap, HashSet}, fmt::{Debug, Display, Formatter}, hash::{Hash, Hasher}, mem, ops::{Add, Deref, Div, Mul, Neg, Rem, Sub}, rc::Rc};
 use num::{bigint::ParseBigIntError, Integer, Num, One, Signed};
 pub use once_cell::unsync::Lazy;
 pub use mem::MaybeUninit;
@@ -633,7 +632,7 @@ where T: DafnyType {
     pub fn cardinality(&self) -> DafnyInt {
         DafnyInt::from_usize(self.cardinality_usize())
     }
-    pub fn select(&self, index: SizeT) -> T {
+    pub fn get_usize(&self, index: SizeT) -> T {
         let array = self.to_array();
         array[index].clone()
     }
@@ -666,7 +665,7 @@ where T: DafnyType {
     }
 
     pub fn get(&self, index: &DafnyInt) -> T {
-        self.select(index.data.to_usize().unwrap())
+        self.get_usize(index.data.to_usize().unwrap())
     }
 }
 
@@ -705,7 +704,7 @@ impl <T> PartialEq<Sequence<T>> for Sequence<T>
         }
         let mut i: usize = 0;
         for value in values.iter() {
-            if value != &other.select(i) {
+            if value != &other.get_usize(i) {
                 return false;
             }
             i += 1;
@@ -723,7 +722,7 @@ impl <T: DafnyTypeEq> PartialOrd for Sequence<T> {
             },
             Ordering::Less => {
                 for i in 0..self.cardinality_usize() {
-                    if self.select(i) != other.select(i) {
+                    if self.get_usize(i) != other.get_usize(i) {
                         return None;
                     }
                 }
@@ -731,7 +730,7 @@ impl <T: DafnyTypeEq> PartialOrd for Sequence<T> {
             },
             Ordering::Greater => {
                 for i in 0..other.cardinality_usize() {
-                    if self.select(i) != other.select(i) {
+                    if self.get_usize(i) != other.get_usize(i) {
                         return None;
                     }
                 }
@@ -1080,10 +1079,6 @@ impl <V: DafnyTypeEq> Set<V> {
             data: Rc::new(hashset)
         }
     }
-}
-
-impl <V: DafnyTypeEq> Set<V>
-{
     pub fn cardinality_usize(&self) -> usize {
         self.data.len()
     }
@@ -1196,6 +1191,10 @@ impl <V: DafnyTypeEq> Set<V>
 
     pub fn iter(&self) -> std::collections::hash_set::Iter<'_, V> {
         self.data.iter()
+    }
+
+    pub fn peek(&self) -> V {
+        self.data.iter().next().unwrap().clone()
     }
 }
 
@@ -1403,6 +1402,10 @@ impl <V: DafnyTypeEq> Multiset<V>
 
     pub fn as_dafny_multiset(&self) -> Multiset<V> {
         self.clone()
+    }
+
+    pub fn peek(&self) -> V {
+        self.data.iter().next().unwrap().0.clone()
     }
 }
 
@@ -2284,7 +2287,7 @@ impl <V: DafnyTypeEq> Forall<V> for Set<V> {
 #[macro_export]
 macro_rules! cast {
     ($raw:expr, $id:ty) => {
-        $crate::modify!($raw).as_any_mut().downcast_mut::<$id>().unwrap()
+        $crate::modify!($raw).as_any_mut().downcast_mut::<$id>().unwrap() as *mut $id
     }
 }
 
@@ -2397,6 +2400,7 @@ macro_rules! update_field_uninit {
 }
 
 // Macro to call at the end of the first new; constructor when not every field is guaranteed to be assigned.
+#[macro_export]
 macro_rules! update_field_if_uninit {
     ($t:expr, $field:ident, $field_assigned:expr, $value:expr) => {
         {
@@ -2477,3 +2481,96 @@ macro_rules! maybe_placebos_from {
         }
     }
 }
+
+////////////////
+// Coercion
+////////////////
+
+pub trait UpcastTo<U> {
+    fn upcast_to(&self) -> U;
+}
+
+#[macro_export]
+macro_rules! UpcastTo {
+    ($from:ty, $to:ty) => {
+        impl UpcastTo<*mut $to> for *mut $from {
+            fn upcast_to(&self) -> *mut $to {
+                (*self) as *mut $to
+            }
+        }
+    };
+}
+
+// UpcastTo for pointers
+impl <T: 'static> UpcastTo<*mut dyn Any> for *mut T {
+    fn upcast_to(&self) -> *mut dyn Any {
+        (*self) as *mut dyn Any
+    }
+}
+
+// UpcastTo for sets
+impl <V, U>
+  UpcastTo<Set<V>> for Set<U>
+  where V: DafnyTypeEq,
+        U: DafnyTypeEq + UpcastTo<V>
+{
+    fn upcast_to(&self) -> Set<V> {
+        // We need to upcast individual elements
+        let mut new_set: HashSet<V> = HashSet::<V>::default();
+        for value in self.data.iter() {
+            new_set.insert(value.upcast_to());
+        }
+        Set::from_hashset_owned(new_set)
+    }
+}
+
+// UpcastTo for sequences
+impl <V, U>
+  UpcastTo<Sequence<V>> for Sequence<U>
+  where V: DafnyTypeEq,
+        U: DafnyTypeEq + UpcastTo<V>
+{
+    fn upcast_to(&self) -> Sequence<V> {
+        // We need to upcast individual elements
+        let mut new_seq: Vec<V> = Vec::<V>::default();
+        for value in self.to_array().iter() {
+            new_seq.push(value.upcast_to());
+        }
+        Sequence::from_array_owned(new_seq)
+    }
+}
+
+// Upcast for multisets
+impl <V, U>
+  UpcastTo<Multiset<V>> for Multiset<U>
+  where V: DafnyTypeEq,
+        U: DafnyTypeEq + UpcastTo<V>
+{
+    fn upcast_to(&self) -> Multiset<V> {
+        // We need to upcast individual elements
+        let mut new_multiset: HashMap<V, DafnyInt> = HashMap::<V, DafnyInt>::default();
+        for (value, count) in self.data.iter() {
+            new_multiset.insert(value.upcast_to(), count.clone());
+        }
+        Multiset::from_hashmap_owned(new_multiset)
+    }
+}
+
+// Upcast for Maps
+impl <K, U, V> UpcastTo<Map<K, V>> for Map<K, U>
+  where K: DafnyTypeEq,
+        U: DafnyTypeEq + UpcastTo<V>,
+        V: DafnyTypeEq
+{
+    fn upcast_to(&self) -> Map<K, V> {
+        // We need to upcast individual elements
+        let mut new_map: HashMap<K, V> = HashMap::<K, V>::default();
+        for (key, value) in self.data.iter() {
+            new_map.insert(key.clone(), value.upcast_to());
+        }
+        Map::from_hashmap_owned(new_map)
+    }
+}
+
+
+
